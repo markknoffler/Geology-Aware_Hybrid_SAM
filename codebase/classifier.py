@@ -11,7 +11,8 @@ class SimpleCNN(nn.Module):
 
         self.pool = nn.MaxPool2d(2, 2)
 
-        self.fc1 = nn.Linear(128 * 32 * 32, 256)  # Assuming 128x128 input images
+        # 128x128 -> pool -> 64x64 -> pool -> 32x32 -> pool -> 16x16
+        self.fc1 = nn.Linear(128 * 16 * 16, 256)
         self.fc2 = nn.Linear(256, num_classes)
 
     def forward(self, x):
