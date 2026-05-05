@@ -1,0 +1,2 @@
+best_val_f1,epochs,batch_size,lr,weight_decay,backbone,tversky_alpha,tversky_beta,metric_threshold,dataset_root
+0.8970915079116821,100,32,0.0003,0.0001,tf_efficientnet_b4,0.3,0.7,0.5,/home/user/Desktop/Deep_learning_projects/4PI/dataset_bijie_landslide/Bijie-landslide-dataset
