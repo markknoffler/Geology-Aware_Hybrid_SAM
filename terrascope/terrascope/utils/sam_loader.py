@@ -53,12 +53,16 @@ def load_sam_weights(model: nn.Module, sam_path: str):
             m_v = model_state[k]
             if v.shape != m_v.shape:
                 # Interpolate from checkpoint size to model size
-                # Shape is (L, C), we interpolate along L
                 v_reshaped = v.unsqueeze(0).permute(0, 2, 1) # (1, C, L)
                 v_interp = torch.nn.functional.interpolate(
                     v_reshaped, size=m_v.shape[0], mode="linear", align_corners=False
                 )
                 new_state[k] = v_interp.permute(0, 2, 1).squeeze(0) # (L_new, C)
+
+    # 5. Load the Positional Encoding Gaussian Matrix (Critical for spatial awareness)
+    pe_key = "prompt_encoder.pe_layer.positional_encoding_gaussian_matrix"
+    if pe_key in state_dict:
+        new_state["prompts.pe_layer.positional_encoding_gaussian_matrix"] = state_dict[pe_key]
 
     missing, unexpected = model.load_state_dict(new_state, strict=False)
     print(f"Loaded {len(new_state)} tensors from SAM checkpoint.")

@@ -65,7 +65,7 @@ class JointStreamAttention(nn.Module):
         dem = dem_hwc.view(b, n, c)
         rn = self.rgb_ln(rgb)
         dn = self.dem_ln(dem)
-        hh = self.half_heads
+        gate = torch.sigmoid(self.stream_gate)
 
         def run_rgb_query():
             q = self.q_rgb(rn).view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
@@ -75,8 +75,8 @@ class JointStreamAttention(nn.Module):
             vr = vr.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
             kd = kd.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
             vd = vd.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
-            k = torch.cat([kr[:, :hh], kd[:, hh:]], dim=1)
-            v = torch.cat([vr[:, :hh], vd[:, hh:]], dim=1)
+            k = kr * (1.0 - gate) + kd * gate
+            v = vr * (1.0 - gate) + vd * gate
             o = self._attn(q, k, v).transpose(1, 2).reshape(b, n, c)
             return self.out_rgb(o)
 
