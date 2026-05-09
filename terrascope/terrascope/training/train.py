@@ -14,7 +14,13 @@ from terrascope.core.model import Terrascope, build_terrascope_b
 from terrascope.data.factory import build_datasets
 from terrascope.losses.composite import LossWeights, composite_segmentation_loss
 from terrascope.utils.checkpointing import latest_checkpoint
-from terrascope.utils.metrics import segmentation_metrics_from_logits
+import numpy as np
+
+from terrascope.utils.metrics import (
+    confusion_counts_from_logits,
+    pixel_metrics_from_confusion,
+    ranking_metrics_from_prob_arrays,
+)
 
 
 class TerrascopeWrapper(nn.Module):
@@ -27,17 +33,21 @@ class TerrascopeWrapper(nn.Module):
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Train Terrascope (dual-stream, from scratch)")
+    p = argparse.ArgumentParser(
+        description="Train Terrascope (dual-stream). Landslide4Sense uses RGB+DEM/slope bands per Landslide4Sense/DiGATe-style loaders."
+    )
     p.add_argument("--dataset", choices=["landslide4sense", "bijie"], required=True)
     p.add_argument("--dataset-root", required=True)
     p.add_argument("--results-dir", default=".")
-    p.add_argument("--epochs", type=int, default=40)
-    p.add_argument("--batch-size", type=int, default=2)
-    p.add_argument("--num-workers", type=int, default=2)
-    p.add_argument("--lr", type=float, default=1e-4)
-    p.add_argument("--weight-decay", type=float, default=1e-2)
+    # Align with DiGATe / baseline paper Table 1 (reduce batch manually if ViT VRAM spikes).
+    p.add_argument("--epochs", type=int, default=100)
+    p.add_argument("--batch-size", type=int, default=8)
+    p.add_argument("--num-workers", type=int, default=4)
+    p.add_argument("--lr", type=float, default=3e-4)
+    p.add_argument("--weight-decay", type=float, default=1e-4)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--target-size", type=int, default=512)
+    # Paper resizes Landslide4Sense CNN inputs to 256; Terrascope patch geometry must equal this.
+    p.add_argument("--target-size", type=int, default=256)
     p.add_argument("--save-every", type=int, default=5)
     p.add_argument("--resume", default="auto", help="'auto' | path/to/ckpt.pt | 'none'")
 
@@ -49,8 +59,15 @@ def parse_args():
     p.add_argument("--w-boundary", type=float, default=0.0)
     p.add_argument("--w-tgbc", type=float, default=0.05)
     p.add_argument("--w-cscd", type=float, default=0.05)
-    p.add_argument("--tversky-alpha", type=float, default=0.7)
-    p.add_argument("--tversky-beta", type=float, default=0.3)
+    # Paper §3.5: Tversky α=0.3, β=0.7 (emphasize recall on sparse landslide pixels).
+    p.add_argument("--tversky-alpha", type=float, default=0.3)
+    p.add_argument("--tversky-beta", type=float, default=0.7)
+    p.add_argument(
+        "--l4s-train-fraction",
+        type=float,
+        default=0.9,
+        help="Landslide4Sense only: fraction of masked TrainData used for optimization (hold-out is disjoint).",
+    )
     return p.parse_args()
 
 
@@ -131,20 +148,15 @@ def run_epoch(
     lw: LossWeights,
     training: bool,
     optimizer=None,
+    *,
+    pool_ranking: bool = False,
 ):
     model.train() if training else model.eval()
     losses = []
-    metric_hist = {
-        "accuracy": [],
-        "precision": [],
-        "recall": [],
-        "f1": [],
-        "iou": [],
-        "auroc": [],
-        "auprc": [],
-        "best_f1": [],
-        "best_threshold": [],
-    }
+    tp = fp = tn = fn = 0.0
+    probs_chunks: list[np.ndarray] | None = [] if pool_ranking and not training else None
+    y_chunks: list[np.ndarray] | None = [] if pool_ranking and not training else None
+
     need_aux = lw.cscd > 0
     prompts = net.prompts
 
@@ -169,25 +181,38 @@ def run_epoch(
 
             losses.append(float(loss.item()))
 
-            batch_m = segmentation_metrics_from_logits(logits, mask)
-            for k in metric_hist:
-                v = float(batch_m.get(k, 0.0))
-                if v == v:  # ignore NaN
-                    metric_hist[k].append(v)
+            btp, bfp, btn, bfn = confusion_counts_from_logits(logits.detach(), mask)
+            tp += btp
+            fp += bfp
+            tn += btn
+            fn += bfn
+
+            if probs_chunks is not None and y_chunks is not None:
+                pr = torch.sigmoid(logits).detach().cpu().numpy().ravel().astype(np.float32)
+                yy = mask.detach().cpu().numpy().ravel().astype(np.uint8)
+                probs_chunks.append(pr)
+                y_chunks.append(yy)
+
+    pix = pixel_metrics_from_confusion(tp, fp, tn, fn)
+
+    if probs_chunks is not None and y_chunks is not None and len(probs_chunks) > 0:
+        rank = ranking_metrics_from_prob_arrays(np.concatenate(probs_chunks), np.concatenate(y_chunks))
+    elif not training:
+        rank = {"auroc": float("nan"), "auprc": float("nan"), "best_f1": pix["f1"], "best_threshold": 0.5}
+    else:
+        rank = {"auroc": float("nan"), "auprc": float("nan"), "best_f1": float("nan"), "best_threshold": 0.5}
 
     out = {
         "loss": float(sum(losses) / max(1, len(losses))),
-        "accuracy": float(sum(metric_hist["accuracy"]) / max(1, len(metric_hist["accuracy"]))),
-        "precision": float(sum(metric_hist["precision"]) / max(1, len(metric_hist["precision"]))),
-        "recall": float(sum(metric_hist["recall"]) / max(1, len(metric_hist["recall"]))),
-        "f1": float(sum(metric_hist["f1"]) / max(1, len(metric_hist["f1"]))),
-        "iou": float(sum(metric_hist["iou"]) / max(1, len(metric_hist["iou"]))),
-        "auroc": float(sum(metric_hist["auroc"]) / max(1, len(metric_hist["auroc"]))),
-        "auprc": float(sum(metric_hist["auprc"]) / max(1, len(metric_hist["auprc"]))),
-        "image_best_f1": float(sum(metric_hist["best_f1"]) / max(1, len(metric_hist["best_f1"]))),
-        "image_best_threshold": float(
-            sum(metric_hist["best_threshold"]) / max(1, len(metric_hist["best_threshold"]))
-        ),
+        "accuracy": pix["accuracy"],
+        "precision": pix["precision"],
+        "recall": pix["recall"],
+        "f1": pix["f1"],
+        "iou": pix["iou"],
+        "auroc": rank["auroc"],
+        "auprc": rank["auprc"],
+        "image_best_f1": rank["best_f1"],
+        "image_best_threshold": rank["best_threshold"],
     }
     return out
 
@@ -195,6 +220,8 @@ def run_epoch(
 def main():
     args = parse_args()
     torch.manual_seed(args.seed)
+    if args.dataset == "landslide4sense" and not (0.0 < args.l4s_train_fraction < 1.0):
+        raise ValueError("--l4s-train-fraction must lie in (0, 1).")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     output_dir, ckpt_dir, results_dir = ensure_dirs(Path(args.results_dir), args.dataset)
@@ -202,7 +229,13 @@ def main():
     final_csv = results_dir / "final_metrics.csv"
     lw = loss_weights_from_args(args)
 
-    train_ds, val_ds, test_ds = build_datasets(args.dataset, args.dataset_root, args.target_size, args.seed)
+    train_ds, val_ds, test_ds = build_datasets(
+        args.dataset,
+        args.dataset_root,
+        args.target_size,
+        args.seed,
+        l4s_train_fraction=args.l4s_train_fraction,
+    )
     train_loader = DataLoader(
         train_ds,
         batch_size=args.batch_size,
@@ -221,15 +254,21 @@ def main():
         if val_ds is not None
         else None
     )
-    test_loader = DataLoader(
-        test_ds,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=torch.cuda.is_available(),
+    test_ds_eff = test_ds if test_ds is not None else val_ds
+    test_loader = (
+        DataLoader(
+            test_ds_eff,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=torch.cuda.is_available(),
+        )
+        if test_ds_eff is not None
+        else None
     )
 
-    base_model = build_terrascope_b().to(device)
+    dem_ch = 3 if args.dataset == "landslide4sense" else 1
+    base_model = build_terrascope_b(image_size=args.target_size, dem_in_chans=dem_ch).to(device)
     model = TerrascopeWrapper(base_model).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -255,6 +294,7 @@ def main():
             lw=lw,
             training=True,
             optimizer=optimizer,
+            pool_ranking=False,
         )
         train_metrics["fps"] = len(train_ds) / max(1e-6, (time.time() - e0))
 
@@ -267,6 +307,7 @@ def main():
                 lw=lw,
                 training=False,
                 optimizer=None,
+                pool_ranking=True,
             )
         else:
             val_metrics = {k: 0.0 for k in train_metrics.keys() if k != "fps"}
@@ -310,6 +351,8 @@ def main():
     best_path = ckpt_dir / "best.pt"
     if best_path.exists():
         _, best_val_f1 = _load_checkpoint(best_path, base_model, optimizer)
+    if test_loader is None:
+        raise RuntimeError("No validation/test split available for final evaluation.")
     test_metrics = run_epoch(
         model=model,
         loader=test_loader,
@@ -318,6 +361,7 @@ def main():
         lw=lw,
         training=False,
         optimizer=None,
+        pool_ranking=True,
     )
     _append_csv(
         final_csv,
@@ -353,6 +397,7 @@ def main():
             "w_cscd": args.w_cscd,
             "tversky_alpha": args.tversky_alpha,
             "tversky_beta": args.tversky_beta,
+            "l4s_train_fraction": args.l4s_train_fraction,
         },
     )
 

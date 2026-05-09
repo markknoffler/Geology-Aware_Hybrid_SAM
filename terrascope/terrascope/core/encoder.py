@@ -11,11 +11,15 @@ from terrascope.core.image_encoder import PatchEmbed
 
 
 class DEMPatchEmbed(nn.Module):
-    def __init__(self, patch_embed: PatchEmbed):
+    def __init__(self, patch_embed: PatchEmbed, dem_in_chans: int = 1):
         super().__init__()
         proj = patch_embed.proj
         self.proj = nn.Conv2d(
-            1, proj.out_channels, kernel_size=proj.kernel_size, stride=proj.stride, padding=proj.padding
+            dem_in_chans,
+            proj.out_channels,
+            kernel_size=proj.kernel_size,
+            stride=proj.stride,
+            padding=proj.padding,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -48,6 +52,7 @@ class TerrascopeEncoder(nn.Module):
         global_attn_indexes: Tuple[int, ...] = (2, 5, 8, 11),
         skip_tap_layers: Tuple[int, ...] = (3, 7, 11),
         mid_aux_layer: int = 5,
+        dem_in_chans: int = 1,
     ) -> None:
         super().__init__()
         self.embed_dim = embed_dim
@@ -62,7 +67,7 @@ class TerrascopeEncoder(nn.Module):
             in_chans=in_chans,
             embed_dim=embed_dim,
         )
-        self.dem_patch_embed = DEMPatchEmbed(self.patch_embed)
+        self.dem_patch_embed = DEMPatchEmbed(self.patch_embed, dem_in_chans=dem_in_chans)
 
         token_hw = img_size // patch_size
         input_size = (token_hw, token_hw)

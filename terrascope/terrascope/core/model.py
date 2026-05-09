@@ -36,6 +36,7 @@ class Terrascope(nn.Module):
         encoder_num_heads: int = 12,
         encoder_global_attn_indexes: tuple[int, ...] = (2, 5, 8, 11),
         prompt_embed_dim: int = 256,
+        dem_in_chans: int = 1,
     ):
         super().__init__()
         self.image_size = image_size
@@ -49,6 +50,7 @@ class Terrascope(nn.Module):
             num_heads=encoder_num_heads,
             out_chans=prompt_embed_dim,
             global_attn_indexes=encoder_global_attn_indexes,
+            dem_in_chans=dem_in_chans,
         )
         self.mask_decoder = MaskDecoder(
             num_multimask_outputs=3,
@@ -98,14 +100,20 @@ class Terrascope(nn.Module):
         return masks, iou, aux
 
 
-def build_terrascope_b() -> Terrascope:
-    """ViT-B scale Terrascope (SAM-B geometry), always randomly initialized."""
+def build_terrascope_b(
+    *,
+    image_size: int = 1024,
+    patch_size: int = 16,
+    dem_in_chans: int = 1,
+) -> Terrascope:
+    """ViT-B-scale Terrascope (SAM-B patch geometry); random init. `image_size` must match training crop."""
     return Terrascope(
-        image_size=1024,
-        patch_size=16,
+        image_size=image_size,
+        patch_size=patch_size,
         encoder_embed_dim=768,
         encoder_depth=12,
         encoder_num_heads=12,
         encoder_global_attn_indexes=(2, 5, 8, 11),
         prompt_embed_dim=256,
+        dem_in_chans=dem_in_chans,
     )

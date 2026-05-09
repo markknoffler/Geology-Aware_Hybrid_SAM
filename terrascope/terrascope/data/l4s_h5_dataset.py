@@ -1,26 +1,33 @@
+"""
+Landslide4Sense HDF5 loader aligned with the DiGATe-style dual-stream baseline:
+RGB = (B4, B3, B2), Stream B (topography) = (NDVI from B8/B4, slope B13, DEM B14).
+
+See Landslide4Sense paper / IEEE TGRS format and SAM/ablation_study/baseline_models/common/datasets.py.
+"""
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
 import h5py
 import numpy as np
+import random
 import torch
 from torch.utils.data import Dataset
 import torchvision.transforms.functional as TF
 from torchvision.transforms import InterpolationMode
 
+_EPS = 1e-6
 
-def _pair_h5_files(img_dir: Path, mask_dir: Optional[Path]) -> List[Tuple[Path, Optional[Path]]]:
+
+def _pair_h5_files(img_dir: Path, mask_dir: Path) -> List[Tuple[Path, Path]]:
     img_files = sorted(img_dir.glob("*.h5"))
     if not img_files:
         raise FileNotFoundError(f"No .h5 files found in {img_dir}")
-    if mask_dir is None:
-        return [(p, None) for p in img_files]
 
     masks_by_suffix = {}
     for m in sorted(mask_dir.glob("*.h5")):
-        key = m.stem.split("_")[-1]
-        masks_by_suffix[key] = m
+        masks_by_suffix[m.stem.split("_")[-1]] = m
 
     pairs = []
     for img in img_files:
@@ -31,16 +38,46 @@ def _pair_h5_files(img_dir: Path, mask_dir: Optional[Path]) -> List[Tuple[Path, 
     return pairs
 
 
-pair_h5_files = _pair_h5_files
-
-
 def _read_first_existing(hf: h5py.File, candidates: Sequence[str]) -> np.ndarray:
     for k in candidates:
         if k in hf:
             return np.asarray(hf[k])
     if len(hf.keys()) == 1:
         return np.asarray(hf[next(iter(hf.keys()))])
-    raise KeyError(f"Unable to detect key in h5 file. candidates={candidates}, available={list(hf.keys())}")
+    raise KeyError(f"No known key in h5 ({list(hf.keys())})")
+
+
+def _to_band_chw(raw: np.ndarray) -> np.ndarray:
+    """Normalize Landslide4Sense cube to CHW (~14 Sentinel bands per Baseline loaders)."""
+    image = np.asarray(raw, dtype=np.float32).squeeze()
+    if image.ndim == 3 and image.shape[0] > 20:
+        pass  # already CHW
+    elif image.ndim == 3 and image.shape[-1] <= 20:
+        image = np.transpose(image, (2, 0, 1))
+    elif image.ndim == 2:
+        image = image[None, ...]
+    elif image.ndim == 3:
+        image = np.transpose(image, (2, 0, 1))
+    else:
+        raise ValueError(f"Unexpected ndarray shape after squeeze {image.shape}")
+    return image
+
+
+def _to_binary_mask(mask: np.ndarray, *, threshold_zero: float = 1e-6) -> np.ndarray:
+    m = np.squeeze(mask.astype(np.float32))
+    return (np.abs(m) > threshold_zero).astype(np.float32)
+
+
+def _minmax_chw_tensor(t: torch.Tensor) -> torch.Tensor:
+    out = t.clone()
+    for c in range(out.shape[0]):
+        plane = out[c]
+        mn = plane.min().item()
+        mx = plane.max().item()
+        if mx > mn:
+            plane = (plane - mn) / (mx - mn + _EPS)
+        out[c] = torch.clamp(plane, 0.0, 1.0)
+    return out
 
 
 @dataclass
@@ -48,70 +85,110 @@ class L4SConfig:
     root: str
     image_key_candidates: Tuple[str, ...] = ("img", "image", "images", "x", "X")
     mask_key_candidates: Tuple[str, ...] = ("mask", "masks", "label", "labels", "y", "Y")
-    dem_channel: int = 3
-    rgb_channels: Tuple[int, int, int] = (0, 1, 2)
-    target_size: int = 512
-    split_seed: int = 42
+    target_size: int = 256
+    augment_train: bool = True
 
 
 class Landslide4SenseH5Dataset(Dataset):
     """
-    Uses TrainData/img + TrainData/mask and creates a deterministic split:
-    - train: 90%
-    - test: 10%
+    Paper-aligned dual modalities from one H5 multispectral cube.
+    Optionally uses list of indices into sorted TrainData img list (paired with masks).
     """
 
-    def __init__(self, config: L4SConfig, split: str = "train"):
+    def __init__(
+        self,
+        config: L4SConfig,
+        indices: Optional[Sequence[int]] = None,
+        *,
+        split: str = "train",
+    ):
         self.cfg = config
         self.split = split
         root = Path(config.root)
         train_img = root / "TrainData" / "img"
         train_mask = root / "TrainData" / "mask"
-        self.pairs = _pair_h5_files(train_img, train_mask)
+        all_pairs = _pair_h5_files(train_img, train_mask)
 
-        rng = np.random.RandomState(config.split_seed)
-        idx = np.arange(len(self.pairs))
-        rng.shuffle(idx)
-        cut = int(0.9 * len(idx))
-        train_idx = idx[:cut]
-        test_idx = idx[cut:]
-        chosen = train_idx if split == "train" else test_idx
-        self.pairs = [self.pairs[i] for i in chosen]
+        if indices is None:
+            idx_range = np.arange(len(all_pairs))
+        else:
+            idx_range = np.asarray(list(indices), dtype=np.int64)
+        self.pairs = [all_pairs[i] for i in idx_range]
 
     def __len__(self):
         return len(self.pairs)
 
-    def _load_modalities(self, img_path: Path, mask_path: Path):
+    @staticmethod
+    def _spectral_to_rgb_topo(image_chw: np.ndarray):
+        """Match baseline_models L4SDualStreamDataset indexing."""
+        if image_chw.shape[0] < 14:
+            raise ValueError(
+                f"Landslide4Sense patch needs ≥14 Sentinel-2 stacked bands (CHW), got C={image_chw.shape[0]}"
+            )
+        B2, B3, B4 = image_chw[1], image_chw[2], image_chw[3]
+        B8 = image_chw[7]
+        B13, B14 = image_chw[12], image_chw[13]
+        ndvi = np.clip((B8 - B4) / (B8 + B4 + _EPS), -1.0, 1.0).astype(np.float32)
+        rgb = np.stack([B4, B3, B2], axis=0).astype(np.float32)
+        topo = np.stack([ndvi, B13, B14], axis=0).astype(np.float32)
+        return rgb, topo
+
+    def _load_arrays(self, img_path: Path, mask_path: Path):
         with h5py.File(img_path, "r") as hf:
-            arr = _read_first_existing(hf, self.cfg.image_key_candidates)
+            raw = _read_first_existing(hf, self.cfg.image_key_candidates)
         with h5py.File(mask_path, "r") as hf:
-            m = _read_first_existing(hf, self.cfg.mask_key_candidates)
+            mraw = np.asarray(_read_first_existing(hf, self.cfg.mask_key_candidates))
 
-        arr = np.squeeze(arr)
-        m = np.squeeze(m)
-        if arr.ndim == 2:
-            arr = arr[..., None]
-        if arr.shape[-1] <= self.cfg.dem_channel:
-            raise ValueError(f"DEM channel index {self.cfg.dem_channel} out of range for {img_path.name}: {arr.shape}")
+        image_chw = _to_band_chw(raw)
+        rgb, topo = self._spectral_to_rgb_topo(image_chw)
+        mask = _to_binary_mask(mraw)
+        if mask.ndim == 0:
+            mask = np.zeros(rgb.shape[-2:], dtype=np.float32)
+        return rgb, topo, mask
 
-        rgb = arr[..., list(self.cfg.rgb_channels)].astype(np.float32)
-        dem = arr[..., self.cfg.dem_channel].astype(np.float32)
-        mask = m.astype(np.float32)
-        return rgb, dem, mask
+    def _maybe_augment(self, rgb_t: torch.Tensor, topo_t: torch.Tensor, mask_t: torch.Tensor):
+        if not self.cfg.augment_train or self.split != "train":
+            return rgb_t, topo_t, mask_t
+        p = 0.5
+        if random.random() < p:
+            rgb_t = TF.hflip(rgb_t)
+            topo_t = TF.hflip(topo_t)
+            mask_t = TF.hflip(mask_t)
+        if random.random() < p:
+            rgb_t = TF.vflip(rgb_t)
+            topo_t = TF.vflip(topo_t)
+            mask_t = TF.vflip(mask_t)
+        if random.random() < p:
+            rgb_t = rgb_t + torch.randn_like(rgb_t) * 0.05
+            topo_t = topo_t + torch.randn_like(topo_t) * 0.05
+        topo_t = torch.clamp(topo_t, min=-3.0, max=3.0)
+        return rgb_t, topo_t, mask_t
 
     def __getitem__(self, idx):
         img_path, mask_path = self.pairs[idx]
-        rgb, dem, mask = self._load_modalities(img_path, mask_path)
+        rgb, topo, mask = self._load_arrays(img_path, mask_path)
 
-        rgb_t = torch.from_numpy(rgb).permute(2, 0, 1)
-        dem_t = torch.from_numpy(dem).unsqueeze(0)
-        mask_t = torch.from_numpy(mask).unsqueeze(0)
+        rgb_t = torch.from_numpy(rgb)
+        topo_t = torch.from_numpy(topo)
+        mask_t = torch.from_numpy(mask[None, ...])
 
-        rgb_t = TF.resize(rgb_t, [self.cfg.target_size, self.cfg.target_size], interpolation=InterpolationMode.BILINEAR, antialias=True)
-        dem_t = TF.resize(dem_t, [self.cfg.target_size, self.cfg.target_size], interpolation=InterpolationMode.BILINEAR, antialias=True)
-        mask_t = TF.resize(mask_t, [self.cfg.target_size, self.cfg.target_size], interpolation=InterpolationMode.NEAREST)
+        hw = self.cfg.target_size
+        rgb_t = TF.resize(rgb_t, [hw, hw], interpolation=InterpolationMode.BILINEAR, antialias=True)
+        topo_t = TF.resize(topo_t, [hw, hw], interpolation=InterpolationMode.BILINEAR, antialias=True)
+        mask_t = TF.resize(mask_t, [hw, hw], interpolation=InterpolationMode.NEAREST)
 
-        rgb_t = TF.normalize(rgb_t / (rgb_t.max().clamp(min=1e-6)), mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        dem_t = (dem_t - dem_t.mean()) / (dem_t.std().clamp(min=1e-6))
+        rgb_t = _minmax_chw_tensor(rgb_t)
+        topo_t = _minmax_chw_tensor(topo_t.float())
+        # NDVI branch can go negative — shift to roughly [0,1] for stable conv stem
+        topo_t = torch.cat(
+            [(topo_t[0:1] + 1.0) * 0.5, topo_t[1:2].clamp(min=1e-6), topo_t[2:3].clamp(min=1e-6)], dim=0
+        )
+        topo_t = _minmax_chw_tensor(topo_t)
+        rgb_t = _minmax_chw_tensor(rgb_t)
         mask_t = (mask_t > 0.5).float()
-        return rgb_t.float(), dem_t.float(), mask_t.float(), {"id": img_path.stem}
+
+        rgb_t, topo_t, mask_t = self._maybe_augment(rgb_t, topo_t, mask_t)
+        rgb_t = rgb_t.float()
+        topo_t = topo_t.float()
+
+        return rgb_t.float(), topo_t.float(), mask_t.float(), {"id": img_path.stem}
