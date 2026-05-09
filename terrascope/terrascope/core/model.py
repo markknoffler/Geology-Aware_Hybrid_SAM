@@ -16,6 +16,7 @@ class TerrascopePromptBundle(nn.Module):
         self.image_embedding_size = image_embedding_size
         self.pe_layer = PositionEmbeddingRandom(embed_dim // 2)
         self.no_mask_embed = nn.Embedding(1, embed_dim)
+        self.landslide_token = nn.Embedding(1, embed_dim)
 
     def dense_pe(self, spatial_size: tuple[int, int], device: torch.device) -> torch.Tensor:
         return self.pe_layer(spatial_size).unsqueeze(0).to(device)
@@ -82,7 +83,8 @@ class Terrascope(nn.Module):
     ):
         enc, mid = self.encoder(rgb, dem, return_mid=return_aux)
         b = rgb.size(0)
-        sparse = torch.zeros(b, 0, self.prompt_embed_dim, device=rgb.device, dtype=rgb.dtype)
+        # Use a learnable landslide token as a global query prompt
+        sparse = self.prompts.landslide_token.weight.unsqueeze(0).expand(b, -1, -1)
         masks, iou = self.mask_decoder(
             image_embeddings=enc,
             image_pe=image_pe,
