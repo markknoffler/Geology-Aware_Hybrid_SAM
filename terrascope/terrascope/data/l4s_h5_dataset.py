@@ -180,8 +180,8 @@ class Landslide4SenseH5Dataset(Dataset):
         mask_t = TF.resize(mask_t, [hw, hw], interpolation=InterpolationMode.NEAREST)
 
         # 1. RGB Stream: ImageNet Normalization
-        rgb_t = rgb_t / 10000.0  # Sentinel-2 raw to roughly [0, 1]
-        rgb_t = torch.clamp(rgb_t, 0.0, 1.0)
+        # Use min-max per patch to ensure the image is in [0, 1] regardless of source range
+        rgb_t = _minmax_chw_tensor(rgb_t)
         for c in range(3):
             rgb_t[c] = (rgb_t[c] - _IMAGENET_MEAN[c]) / (_IMAGENET_STD[c] + _EPS)
 
