@@ -179,19 +179,10 @@ class Landslide4SenseH5Dataset(Dataset):
         topo_t = TF.resize(topo_t, [hw, hw], interpolation=InterpolationMode.BILINEAR, antialias=True)
         mask_t = TF.resize(mask_t, [hw, hw], interpolation=InterpolationMode.NEAREST)
 
-        # 1. RGB Stream: ImageNet Normalization
-        # Use min-max per patch to ensure the image is in [0, 1] regardless of source range
+        # Synchronized with Baseline Research (ablation_study/dual_stream_gated/dataset.py)
+        # Use robust per-patch min-max for both streams to handle satellite variance
         rgb_t = _minmax_chw_tensor(rgb_t)
-        for c in range(3):
-            rgb_t[c] = (rgb_t[c] - _IMAGENET_MEAN[c]) / (_IMAGENET_STD[c] + _EPS)
-
-        # 2. Topography Stream: Global Physical Scaling (Preserve Absolute Features)
-        # topo_t[0] = NDVI [-1, 1], topo_t[1] = Slope [0, 90], topo_t[2] = DEM [0, 10000]
-        ndvi = (topo_t[0:1] + 1.0) * 0.5  # [-1, 1] -> [0, 1]
-        slope = topo_t[1:2] / 90.0        # [0, 90] -> [0, 1]
-        dem = topo_t[2:3] / 10000.0       # [0, 10000] -> [0, 1]
-        topo_t = torch.cat([ndvi, slope, dem], dim=0)
-        topo_t = torch.clamp(topo_t, 0.0, 1.0)
+        topo_t = _minmax_chw_tensor(topo_t.float())
 
         mask_t = (mask_t > 0.5).float()
 

@@ -19,14 +19,27 @@ def dice_loss(logits: torch.Tensor, target: torch.Tensor, eps: float = 1e-6):
     return 1 - dice.mean()
 
 
-def tversky_loss(logits: torch.Tensor, target: torch.Tensor, alpha: float = 0.7, beta: float = 0.3, eps: float = 1e-6):
-    p = torch.sigmoid(logits)
-    t = target.float()
-    tp = (p * t).sum(dim=(2, 3))
-    fp = (p * (1 - t)).sum(dim=(2, 3))
-    fn = ((1 - p) * t).sum(dim=(2, 3))
-    ti = (tp + eps) / (tp + alpha * fp + beta * fn + eps)
-    return 1 - ti.mean()
+class TverskyLoss(nn.Module):
+    def __init__(self, alpha: float = 0.6, beta: float = 0.4, smooth: float = 1.0):
+        super().__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.smooth = smooth
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        # Numerically stable sigmoid
+        probs = torch.sigmoid(pred)
+        
+        target = target.float()
+        dims = (0, 2, 3)
+        
+        tp = (probs * target).sum(dims)
+        fp = (probs * (1 - target)).sum(dims)
+        fn = ((1 - probs) * target).sum(dims)
+        
+        # Tversky index: penalizes False Positives (alpha=0.6) more than False Negatives (beta=0.4)
+        tversky = (tp + self.smooth) / (tp + self.alpha * fp + self.beta * fn + self.smooth)
+        return (1.0 - tversky).mean()
 
 
 def focal_loss(logits: torch.Tensor, target: torch.Tensor, gamma: float = 2.0, alpha: float = 0.25, eps: float = 1e-6):

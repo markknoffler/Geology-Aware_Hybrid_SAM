@@ -51,6 +51,7 @@ def parse_args():
     p.add_argument("--save-every", type=int, default=5)
     p.add_argument("--resume", default="auto", help="'auto' | path/to/ckpt.pt | 'none'")
 
+    p.add_argument("--threshold", type=float, default=0.6)
     p.add_argument("--w-bce", type=float, default=1.0)
     p.add_argument("--w-dice", type=float, default=0.1)
     p.add_argument("--w-tversky", type=float, default=1.0)
@@ -59,10 +60,10 @@ def parse_args():
     p.add_argument("--w-boundary", type=float, default=0.0)
     p.add_argument("--w-tgbc", type=float, default=0.05)
     p.add_argument("--w-cscd", type=float, default=0.05)
-    p.add_argument("--bce-pos-weight", type=float, default=40.0)
+    p.add_argument("--bce-pos-weight", type=float, default=10.0)
     # Paper §3.5: Tversky α=0.7, β=0.3 (penalize FPs on sparse landslide pixels to avoid collapse).
-    p.add_argument("--tversky-alpha", type=float, default=0.7)
-    p.add_argument("--tversky-beta", type=float, default=0.3)
+    p.add_argument("--tversky-alpha", type=float, default=0.6)
+    p.add_argument("--tversky-beta", type=float, default=0.4)
     p.add_argument(
         "--l4s-train-fraction",
         type=float,
@@ -193,7 +194,7 @@ def run_epoch(
 
             losses.append(float(loss.item()))
 
-            btp, bfp, btn, bfn = confusion_counts_from_logits(logits.detach(), mask)
+            btp, bfp, btn, bfn = confusion_counts_from_logits(logits.detach(), mask, threshold=args.threshold)
             tp += btp
             fp += bfp
             tn += btn
@@ -210,9 +211,9 @@ def run_epoch(
     if probs_chunks is not None and y_chunks is not None and len(probs_chunks) > 0:
         rank = ranking_metrics_from_prob_arrays(np.concatenate(probs_chunks), np.concatenate(y_chunks))
     elif not training:
-        rank = {"auroc": float("nan"), "auprc": float("nan"), "best_f1": pix["f1"], "best_threshold": 0.5}
+        rank = {"auroc": float("nan"), "auprc": float("nan"), "best_f1": pix["f1"], "best_threshold": args.threshold}
     else:
-        rank = {"auroc": float("nan"), "auprc": float("nan"), "best_f1": float("nan"), "best_threshold": 0.5}
+        rank = {"auroc": float("nan"), "auprc": float("nan"), "best_f1": float("nan"), "best_threshold": args.threshold}
 
     out = {
         "loss": float(sum(losses) / max(1, len(losses))),
@@ -283,7 +284,7 @@ def main():
     base_model = build_terrascope_b(image_size=args.target_size, dem_in_chans=dem_ch).to(device)
     model = TerrascopeWrapper(base_model).to(device)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = torch.optim.Adam(base_model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     start_epoch = 1
     best_val_f1 = 0.0

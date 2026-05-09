@@ -48,7 +48,7 @@ class JointStreamAttention(nn.Module):
         
         self.out_rgb = nn.Linear(dim, dim)
         self.out_dem = nn.Linear(dim, dim)
-        self.stream_gate = nn.Parameter(torch.zeros(1))
+        self.stream_gate = nn.Parameter(torch.full((1,), -5.0))
 
     def _attn(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         attn = (q * self.scale) @ k.transpose(-2, -1)
