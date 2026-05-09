@@ -43,7 +43,9 @@ def tgbc_loss(
     (ridge-running edges vs along-contour structure).
     """
     p = torch.sigmoid(logits)
-    g = dem_sobel_unit(dem)
+    # Landslide4Sense has 3 topo channels; average them to a single surface for gradient alignment.
+    dem_single = dem.mean(dim=1, keepdim=True) if dem.size(1) > 1 else dem
+    g = dem_sobel_unit(dem_single)
     mp = mask_gradient(p)
     mp_n = mp.norm(dim=1, keepdim=True).clamp_min(eps)
     mp_u = mp / mp_n
