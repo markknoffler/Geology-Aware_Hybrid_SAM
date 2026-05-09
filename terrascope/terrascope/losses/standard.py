@@ -43,6 +43,10 @@ class TverskyLoss(nn.Module):
         return (1.0 - tversky).mean()
 
 
+def tversky_loss(pred: torch.Tensor, target: torch.Tensor, alpha: float = 0.6, beta: float = 0.4, smooth: float = 1.0):
+    return TverskyLoss(alpha=alpha, beta=beta, smooth=smooth)(pred, target)
+
+
 def focal_loss(logits: torch.Tensor, target: torch.Tensor, gamma: float = 2.0, alpha: float = 0.25, eps: float = 1e-6):
     p = torch.sigmoid(logits)
     t = target.float()
