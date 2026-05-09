@@ -18,6 +18,8 @@ import torchvision.transforms.functional as TF
 from torchvision.transforms import InterpolationMode
 
 _EPS = 1e-6
+_IMAGENET_MEAN = [0.485, 0.456, 0.406]
+_IMAGENET_STD = [0.229, 0.224, 0.225]
 
 
 def _pair_h5_files(img_dir: Path, mask_dir: Path) -> List[Tuple[Path, Path]]:
@@ -185,6 +187,11 @@ class Landslide4SenseH5Dataset(Dataset):
         )
         topo_t = _minmax_chw_tensor(topo_t)
         rgb_t = _minmax_chw_tensor(rgb_t)
+        
+        # ImageNet normalization for RGB stream (required for pre-trained SAM weights)
+        for c in range(3):
+            rgb_t[c] = (rgb_t[c] - _IMAGENET_MEAN[c]) / (_IMAGENET_STD[c] + _EPS)
+
         mask_t = (mask_t > 0.5).float()
 
         rgb_t, topo_t, mask_t = self._maybe_augment(rgb_t, topo_t, mask_t)

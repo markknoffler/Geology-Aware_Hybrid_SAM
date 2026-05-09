@@ -52,13 +52,14 @@ def parse_args():
     p.add_argument("--resume", default="auto", help="'auto' | path/to/ckpt.pt | 'none'")
 
     p.add_argument("--w-bce", type=float, default=1.0)
-    p.add_argument("--w-dice", type=float, default=0.0)
+    p.add_argument("--w-dice", type=float, default=0.1)
     p.add_argument("--w-tversky", type=float, default=1.0)
     p.add_argument("--w-focal", type=float, default=0.0)
-    p.add_argument("--w-soft-iou", type=float, default=0.0)
+    p.add_argument("--w-soft-iou", type=float, default=0.1)
     p.add_argument("--w-boundary", type=float, default=0.0)
     p.add_argument("--w-tgbc", type=float, default=0.05)
     p.add_argument("--w-cscd", type=float, default=0.05)
+    p.add_argument("--bce-pos-weight", type=float, default=40.0)
     # Paper §3.5: Tversky α=0.7, β=0.3 (penalize FPs on sparse landslide pixels to avoid collapse).
     p.add_argument("--tversky-alpha", type=float, default=0.7)
     p.add_argument("--tversky-beta", type=float, default=0.3)
@@ -84,6 +85,7 @@ def loss_weights_from_args(args) -> LossWeights:
         cscd=args.w_cscd,
         tversky_alpha=args.tversky_alpha,
         tversky_beta=args.tversky_beta,
+        bce_pos_weight=args.bce_pos_weight,
     )
 
 

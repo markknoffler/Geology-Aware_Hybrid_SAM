@@ -20,6 +20,7 @@ class LossWeights:
     cscd: float = 0.0
     tversky_alpha: float = 0.7
     tversky_beta: float = 0.3
+    bce_pos_weight: float = 40.0
 
 
 def composite_segmentation_loss(
@@ -31,7 +32,8 @@ def composite_segmentation_loss(
 ) -> tuple[torch.Tensor, dict[str, float]]:
     parts: dict[str, torch.Tensor] = {}
     if w.bce > 0:
-        parts["bce"] = standard_mod.bce_with_logits_loss(logits, target)
+        pos_weight = torch.tensor([w.bce_pos_weight], device=logits.device)
+        parts["bce"] = standard_mod.bce_with_logits_loss(logits, target, pos_weight=pos_weight)
     if w.dice > 0:
         parts["dice"] = standard_mod.dice_loss(logits, target)
     if w.tversky > 0:
