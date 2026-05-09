@@ -32,24 +32,23 @@ class JointStreamAttention(nn.Module):
     stream (split along heads), while Q is stream-specific. Mixes modalities inside MHSA.
     """
 
-    def __init__(self, dim: int, num_heads: int):
+    def __init__(self, dim: int, num_heads: int, qkv_bias: bool = True):
         super().__init__()
-        assert dim % num_heads == 0
-        self.dim = dim
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.scale = self.head_dim**-0.5
-        assert num_heads % 2 == 0, "JointStreamAttention requires an even head count"
-        self.half_heads = num_heads // 2
-
+        
         self.rgb_ln = nn.LayerNorm(dim)
         self.dem_ln = nn.LayerNorm(dim)
-        self.q_rgb = nn.Linear(dim, dim)
-        self.q_dem = nn.Linear(dim, dim)
-        self.kv_rgb = nn.Linear(dim, dim * 2)
-        self.kv_dem = nn.Linear(dim, dim * 2)
+        
+        self.q_rgb = nn.Linear(dim, dim, bias=qkv_bias)
+        self.q_dem = nn.Linear(dim, dim, bias=qkv_bias)
+        self.kv_rgb = nn.Linear(dim, dim * 2, bias=qkv_bias)
+        self.kv_dem = nn.Linear(dim, dim * 2, bias=qkv_bias)
+        
         self.out_rgb = nn.Linear(dim, dim)
         self.out_dem = nn.Linear(dim, dim)
+        self.stream_gate = nn.Parameter(torch.zeros(1))
 
     def _attn(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         attn = (q * self.scale) @ k.transpose(-2, -1)
@@ -63,6 +62,7 @@ class JointStreamAttention(nn.Module):
         n = h * w
         rgb = rgb_hwc.view(b, n, c)
         dem = dem_hwc.view(b, n, c)
+        
         rn = self.rgb_ln(rgb)
         dn = self.dem_ln(dem)
         gate = torch.sigmoid(self.stream_gate)
@@ -75,8 +75,11 @@ class JointStreamAttention(nn.Module):
             vr = vr.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
             kd = kd.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
             vd = vd.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
+            
+            # Gated fusion of the dual stream (initially 0)
             k = kr * (1.0 - gate) + kd * gate
             v = vr * (1.0 - gate) + vd * gate
+            
             o = self._attn(q, k, v).transpose(1, 2).reshape(b, n, c)
             return self.out_rgb(o)
 
@@ -84,21 +87,21 @@ class JointStreamAttention(nn.Module):
             q = self.q_dem(dn).view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
             kd, vd = self.kv_dem(dn).chunk(2, dim=-1)
             kr, vr = self.kv_rgb(rn).chunk(2, dim=-1)
-            kd = kd.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
-            vd = vd.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
+            
             kr = kr.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
             vr = vr.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
-            k = torch.cat([kd[:, :hh], kr[:, hh:]], dim=1)
-            v = torch.cat([vd[:, :hh], vr[:, hh:]], dim=1)
+            kd = kd.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
+            vd = vd.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
+            
+            k = kd * (1.0 - gate) + kr * gate
+            v = vd * (1.0 - gate) + vr * gate
+            
             o = self._attn(q, k, v).transpose(1, 2).reshape(b, n, c)
             return self.out_dem(o)
 
-        upd_rgb = run_rgb_query()
-        upd_dem = run_dem_query()
-
-        rgb2 = rgb + upd_rgb
-        dem2 = dem + upd_dem
-        return rgb2.view(b, h, w, c), dem2.view(b, h, w, c)
+        rgb_out = run_rgb_query()
+        dem_out = run_dem_query()
+        return rgb_out.view(b, h, w, c), dem_out.view(b, h, w, c)
 
 
 class CrossStreamFusionBlock(nn.Module):
