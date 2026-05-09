@@ -14,7 +14,7 @@ class GeoStateBlock(nn.Module):
         self.in_proj = nn.Linear(dim, dim * 2)
         self.dw_conv = nn.Conv2d(dim, dim, kernel_size=5, padding=2, groups=dim)
         self.out_proj = nn.Linear(dim, dim)
-        self.gamma = nn.Parameter(torch.ones(1))
+        self.gamma = nn.Parameter(torch.zeros(1))
 
     def forward(self, x_hwc: torch.Tensor) -> torch.Tensor:
         b, h, w, c = x_hwc.shape

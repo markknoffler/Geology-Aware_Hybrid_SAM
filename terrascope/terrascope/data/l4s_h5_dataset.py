@@ -179,23 +179,21 @@ class Landslide4SenseH5Dataset(Dataset):
         topo_t = TF.resize(topo_t, [hw, hw], interpolation=InterpolationMode.BILINEAR, antialias=True)
         mask_t = TF.resize(mask_t, [hw, hw], interpolation=InterpolationMode.NEAREST)
 
-        rgb_t = _minmax_chw_tensor(rgb_t)
-        topo_t = _minmax_chw_tensor(topo_t.float())
-        # NDVI branch can go negative — shift to roughly [0,1] for stable conv stem
-        topo_t = torch.cat(
-            [(topo_t[0:1] + 1.0) * 0.5, topo_t[1:2].clamp(min=1e-6), topo_t[2:3].clamp(min=1e-6)], dim=0
-        )
-        topo_t = _minmax_chw_tensor(topo_t)
-        rgb_t = _minmax_chw_tensor(rgb_t)
-        
-        # ImageNet normalization for RGB stream (required for pre-trained SAM weights)
+        # 1. RGB Stream: ImageNet Normalization
+        rgb_t = rgb_t / 10000.0  # Sentinel-2 raw to roughly [0, 1]
+        rgb_t = torch.clamp(rgb_t, 0.0, 1.0)
         for c in range(3):
             rgb_t[c] = (rgb_t[c] - _IMAGENET_MEAN[c]) / (_IMAGENET_STD[c] + _EPS)
+
+        # 2. Topography Stream: Global Physical Scaling (Preserve Absolute Features)
+        # topo_t[0] = NDVI [-1, 1], topo_t[1] = Slope [0, 90], topo_t[2] = DEM [0, 10000]
+        ndvi = (topo_t[0:1] + 1.0) * 0.5  # [-1, 1] -> [0, 1]
+        slope = topo_t[1:2] / 90.0        # [0, 90] -> [0, 1]
+        dem = topo_t[2:3] / 10000.0       # [0, 10000] -> [0, 1]
+        topo_t = torch.cat([ndvi, slope, dem], dim=0)
+        topo_t = torch.clamp(topo_t, 0.0, 1.0)
 
         mask_t = (mask_t > 0.5).float()
 
         rgb_t, topo_t, mask_t = self._maybe_augment(rgb_t, topo_t, mask_t)
-        rgb_t = rgb_t.float()
-        topo_t = topo_t.float()
-
         return rgb_t.float(), topo_t.float(), mask_t.float(), {"id": img_path.stem}
