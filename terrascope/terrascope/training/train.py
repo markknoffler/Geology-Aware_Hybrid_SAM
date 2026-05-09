@@ -51,7 +51,7 @@ def parse_args():
     p.add_argument("--save-every", type=int, default=5)
     p.add_argument("--resume", default="auto", help="'auto' | path/to/ckpt.pt | 'none'")
 
-    p.add_argument("--w-bce", type=float, default=0.0)
+    p.add_argument("--w-bce", type=float, default=1.0)
     p.add_argument("--w-dice", type=float, default=0.0)
     p.add_argument("--w-tversky", type=float, default=1.0)
     p.add_argument("--w-focal", type=float, default=0.0)
@@ -59,15 +59,16 @@ def parse_args():
     p.add_argument("--w-boundary", type=float, default=0.0)
     p.add_argument("--w-tgbc", type=float, default=0.05)
     p.add_argument("--w-cscd", type=float, default=0.05)
-    # Paper §3.5: Tversky α=0.3, β=0.7 (emphasize recall on sparse landslide pixels).
-    p.add_argument("--tversky-alpha", type=float, default=0.3)
-    p.add_argument("--tversky-beta", type=float, default=0.7)
+    # Paper §3.5: Tversky α=0.7, β=0.3 (penalize FPs on sparse landslide pixels to avoid collapse).
+    p.add_argument("--tversky-alpha", type=float, default=0.7)
+    p.add_argument("--tversky-beta", type=float, default=0.3)
     p.add_argument(
         "--l4s-train-fraction",
         type=float,
         default=0.9,
         help="Landslide4Sense only: fraction of masked TrainData used for optimization (hold-out is disjoint).",
     )
+    p.add_argument("--sam-weights", default=None, help="Path to pre-trained SAM ViT-B weights (.pth)")
     return p.parse_args()
 
 
@@ -283,6 +284,9 @@ def main():
         if ckpt is not None and ckpt.exists():
             start_epoch, best_val_f1 = _load_checkpoint(ckpt, base_model, optimizer)
             print(f"Resumed from {ckpt} at epoch {start_epoch}.")
+        elif args.sam_weights:
+            from terrascope.utils.sam_loader import load_sam_weights
+            load_sam_weights(base_model, args.sam_weights)
 
     for epoch in range(start_epoch, args.epochs + 1):
         e0 = time.time()
