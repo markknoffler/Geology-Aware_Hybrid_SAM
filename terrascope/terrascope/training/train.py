@@ -164,7 +164,14 @@ def run_epoch(
     prompts = net.prompts
 
     with torch.set_grad_enabled(training):
-        for rgb, dem, mask, _ in tqdm.tqdm(loader, desc="Train" if training else "Val", leave=False):
+        for i, (rgb, dem, mask, _) in enumerate(tqdm.tqdm(loader, desc="Train" if training else "Val", leave=False)):
+            if training:
+                global_step = (epoch - 1) * len(loader) + i
+                if global_step < 100:
+                    lr_scale = min(1.0, float(global_step + 1) / 100.0)
+                    for pg in optimizer.param_groups:
+                        pg["lr"] = args.lr * lr_scale
+
             rgb = rgb.to(device, non_blocking=True)
             dem = dem.to(device, non_blocking=True)
             mask = mask.to(device, non_blocking=True)
