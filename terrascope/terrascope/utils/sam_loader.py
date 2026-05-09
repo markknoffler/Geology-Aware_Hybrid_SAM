@@ -46,12 +46,19 @@ def load_sam_weights(model: nn.Module, sam_path: str):
             if k in model_state:
                 new_state[k] = v
 
-    # 4. Encoder Neck (optional, but SAM's neck is specific to 256 out_chans)
-    for k, v in state_dict.items():
-        if k.startswith("image_encoder.neck."):
-            new_key = k.replace("image_encoder.neck.", "encoder.neck.")
-            if new_key in model_state:
-                new_state[new_key] = v
+    # 4. Handle size mismatches for Relative Position Embeddings
+    for k in list(new_state.keys()):
+        if "rel_pos_h" in k or "rel_pos_w" in k:
+            v = new_state[k]
+            m_v = model_state[k]
+            if v.shape != m_v.shape:
+                # Interpolate from checkpoint size to model size
+                # Shape is (L, C), we interpolate along L
+                v_reshaped = v.unsqueeze(0).permute(0, 2, 1) # (1, C, L)
+                v_interp = torch.nn.functional.interpolate(
+                    v_reshaped, size=m_v.shape[0], mode="linear", align_corners=False
+                )
+                new_state[k] = v_interp.permute(0, 2, 1).squeeze(0) # (L_new, C)
 
     missing, unexpected = model.load_state_dict(new_state, strict=False)
     print(f"Loaded {len(new_state)} tensors from SAM checkpoint.")
