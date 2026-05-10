@@ -1,0 +1,2 @@
+best_score,best_checkpoint_metric,epochs,batch_size,lr,weight_decay,metric_threshold,tversky_alpha,tversky_beta,fm_weight,seg_weight,geo_weight,vsmooth_weight,latent_sigma,fm_residual_scale_sq,val_infer_flow_steps,dataset,experiment_name,ctx_ch,model_flow_steps,val_threshold_sweep_enabled
+0.7263212785278005,val_global_f1_sweep,200,32,0.0003,0.0001,0.6,0.6,0.4,1.0,2.0,0.15,0.05,4.0,576.0,0,landslide4sense,tri_encoder_cfm_v2,6,0,True
