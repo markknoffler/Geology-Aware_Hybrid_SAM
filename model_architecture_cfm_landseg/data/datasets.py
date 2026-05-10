@@ -171,6 +171,9 @@ class BijieTripleStreamDataset(Dataset):
         dem_hwc = np.transpose(dem_a, (1, 2, 0))
         rgb_hwc = cv2.resize(rgb_hwc, (self.resize_to, self.resize_to), interpolation=cv2.INTER_LINEAR)
         dem_hwc = cv2.resize(dem_hwc, (self.resize_to, self.resize_to), interpolation=cv2.INTER_LINEAR)
+        # OpenCV may squeeze single-channel arrays to HxW after resize.
+        if dem_hwc.ndim == 2:
+            dem_hwc = dem_hwc[:, :, None]
         y = cv2.resize(y, (self.resize_to, self.resize_to), interpolation=cv2.INTER_NEAREST)
 
         rgb = _minmax_per_channel(torch.from_numpy(np.transpose(rgb_hwc, (2, 0, 1))).float())
