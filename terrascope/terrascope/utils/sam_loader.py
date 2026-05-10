@@ -65,5 +65,19 @@ def load_sam_weights(model: nn.Module, sam_path: str):
         new_state["prompts.pe_layer.positional_encoding_gaussian_matrix"] = state_dict[pe_key]
 
     missing, unexpected = model.load_state_dict(new_state, strict=False)
+    
+    # CRITICAL STABILITY FIX: Zero-init final heads AFTER loading weights.
+    # This prevents pre-trained SAM biases from causing immediate constant-predictor collapse.
+    print("Zeroing final prediction heads for stable landslide fine-tuning...")
+    for mlp in model.mask_decoder.output_hypernetworks_mlps:
+        nn.init.zeros_(mlp.layers[-1].weight)
+        nn.init.zeros_(mlp.layers[-1].bias)
+    if hasattr(model, "aux_head_rgb"):
+        nn.init.zeros_(model.aux_head_rgb.weight)
+        nn.init.zeros_(model.aux_head_rgb.bias)
+    if hasattr(model, "aux_head_dem"):
+        nn.init.zeros_(model.aux_head_dem.weight)
+        nn.init.zeros_(model.aux_head_dem.bias)
+
     print(f"Loaded {len(new_state)} tensors from SAM checkpoint.")
     print(f"Novel components (JointAttn, Fusion, GeoState, DEM-stream) initialized randomly.")

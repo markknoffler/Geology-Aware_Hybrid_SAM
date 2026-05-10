@@ -72,6 +72,16 @@ class Terrascope(nn.Module):
         self.aux_head_rgb = nn.Conv2d(encoder_embed_dim, 1, kernel_size=1)
         self.aux_head_dem = nn.Conv2d(encoder_embed_dim, 1, kernel_size=1)
 
+        # Stability initialization: Zero the final prediction layers to prevent "disintegration"
+        # and constant predictor collapse at start of training.
+        for mlp in self.mask_decoder.output_hypernetworks_mlps:
+            nn.init.zeros_(mlp.layers[-1].weight)
+            nn.init.zeros_(mlp.layers[-1].bias)
+        nn.init.zeros_(self.aux_head_rgb.weight)
+        nn.init.zeros_(self.aux_head_rgb.bias)
+        nn.init.zeros_(self.aux_head_dem.weight)
+        nn.init.zeros_(self.aux_head_dem.bias)
+
     def forward(
         self,
         rgb: torch.Tensor,

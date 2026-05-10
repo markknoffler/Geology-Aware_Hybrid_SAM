@@ -28,8 +28,9 @@ class TverskyLoss(nn.Module):
         self.smooth = smooth
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        # Numerically stable sigmoid
+        # Numerically stable sigmoid with baseline-aligned clamping
         probs = torch.sigmoid(pred)
+        probs = torch.clamp(probs, min=1e-4, max=1.0 - 1e-4)
         
         target = target.float()
         dims = (0, 2, 3)
