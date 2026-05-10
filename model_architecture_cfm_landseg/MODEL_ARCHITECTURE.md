@@ -181,6 +181,12 @@ with \(\alpha_{cfm}\) = `--flow_combine_scale` (default 0.5).
 
 ## 7. Loss functions
 
+### 7.0 Why `train_loss` and `val_loss` can look unrelated (before normalization)
+
+- **Training** runs the model with `gt_mask` set, so the loss includes **conditional flow matching** \(\mathcal{L}_{fm}=\|v_\theta-(\boldsymbol\epsilon-\mathbf{z})\|^2\) and **time-smoothness** terms. Target \(\boldsymbol\epsilon-\mathbf{z}\) uses \(\mathbf{z}=\sigma\cdot\mathrm{logit}(\mathbf{y})\): for binary \(\mathbf{y}\), \(|\mathbf{z}|\) is often \(\mathcal{O}(10\text{–}30)\). A random velocity network therefore contributes a **large raw MSE** (often \(\sim10^2\) per-pixel mean in early epochs)—this is numerical scale, not “wrong HDF5 reads.”
+- **Validation** forward uses `gt_mask=None`, so **FM terms are not computed** at all; **`val_loss` is essentially Tversky + geomorph only** (similar order to \(\sim 1\text{–}5\)).
+- Implementations divide \(\mathcal{L}_{fm}\) and the time-smooth term by **`fm_residual_scale_sq`** (CLI `--fm_residual_scale_sq`, default \(( \sigma\cdot 6 )^2\)) so **logged `train_loss` is comparable in magnitude** to `val_loss` while preserving relative gradient contributions to \(v_\theta\).
+
 Total training objective (weighted sum, see [`losses/composite.py`](losses/composite.py)):
 
 \[

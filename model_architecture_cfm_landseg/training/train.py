@@ -142,6 +142,8 @@ def train_loop(
     vsmooth_weight: float = 0.05,
     tversky_alpha: float = 0.3,
     tversky_beta: float = 0.7,
+    latent_sigma: float = 4.0,
+    fm_residual_scale_sq: float | None = None,
     val_infer_flow_steps: int = 0,
     debug_one_batch: bool = False,
     extra_final: dict | None = None,
@@ -159,6 +161,8 @@ def train_loop(
         seg_weight=seg_weight,
         geo_weight=geo_weight,
         vsmooth_weight=vsmooth_weight,
+        latent_sigma=latent_sigma,
+        fm_residual_scale_sq=fm_residual_scale_sq,
     )
     optimizer = Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
@@ -259,6 +263,8 @@ def train_loop(
         "seg_weight": seg_weight,
         "geo_weight": geo_weight,
         "vsmooth_weight": vsmooth_weight,
+        "latent_sigma": latent_sigma,
+        "fm_residual_scale_sq": criterion.fm_residual_scale_sq,
         "val_infer_flow_steps": val_infer_flow_steps,
     }
     if extra_final:
@@ -295,6 +301,12 @@ def parse_args():
     p.add_argument("--tversky_alpha", type=float, default=0.3)
     p.add_argument("--tversky_beta", type=float, default=0.7)
     p.add_argument("--latent_sigma", type=float, default=4.0)
+    p.add_argument(
+        "--fm_residual_scale_sq",
+        type=float,
+        default=None,
+        help="Divide FM MSE and time-smooth penalties by this (default: (latent_sigma*6)^2 so train_loss is comparable to val_loss scale).",
+    )
     p.add_argument("--debug_one_batch", action="store_true")
     return p.parse_args()
 
@@ -350,6 +362,8 @@ def main():
         vsmooth_weight=args.vsmooth_weight,
         tversky_alpha=args.tversky_alpha,
         tversky_beta=args.tversky_beta,
+        latent_sigma=args.latent_sigma,
+        fm_residual_scale_sq=args.fm_residual_scale_sq,
         val_infer_flow_steps=val_steps,
         debug_one_batch=args.debug_one_batch,
         extra_final={

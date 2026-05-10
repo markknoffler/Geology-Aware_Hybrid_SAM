@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 
 import torch
 import torch.nn as nn
@@ -28,12 +28,19 @@ class TriCFMCompositeLoss(nn.Module):
         seg_weight: float = 2.0,
         geo_weight: float = 0.15,
         vsmooth_weight: float = 0.05,
+        latent_sigma: float = 4.0,
+        fm_residual_scale_sq: Optional[float] = None,
     ):
         super().__init__()
         self.fm_weight = fm_weight
         self.seg_weight = seg_weight
         self.geo_weight = geo_weight
         self.vsmooth_weight = vsmooth_weight
+        self.latent_sigma = latent_sigma
+        # Target velocity is ε − z with |z| ≈ σ × |logit(p)| (~6–7 typical after clipping).
+        self.fm_residual_scale_sq = fm_residual_scale_sq or max(
+            1.0, (latent_sigma * 6.0) ** 2
+        )
         self.tversky = TverskyLoss(alpha=tversky_alpha, beta=tversky_beta)
 
     def forward(self, outputs: Any, target: torch.Tensor, dem_chw: torch.Tensor | None = None) -> torch.Tensor:
@@ -56,10 +63,13 @@ class TriCFMCompositeLoss(nn.Module):
         loss = self.seg_weight * self.tversky(logits, t_main)
 
         if "fm_residual" in out and self.fm_weight > 0:
-            loss = loss + self.fm_weight * out["fm_residual"].mean()
+            fm_mean = out["fm_residual"].mean()
+            loss = loss + self.fm_weight * (fm_mean / self.fm_residual_scale_sq)
 
         if self.vsmooth_weight > 0 and "v_smooth_penalty" in out:
-            loss = loss + self.vsmooth_weight * out["v_smooth_penalty"]
+            loss = loss + self.vsmooth_weight * (
+                out["v_smooth_penalty"] / self.fm_residual_scale_sq
+            )
 
         if self.geo_weight > 0 and dem_chw is not None:
             loss = loss + self.geo_weight * geomorph_alignment_loss(logits, dem_chw.detach())
