@@ -10,7 +10,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from torch.optim import Adam
+import torch.nn as nn
+from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -65,6 +66,24 @@ def prep_batch_triplet(batch: dict, device):
     return rg, dem, ctx, y
 
 
+def _accumulate_thresh_sweep_probs(
+    prob: torch.Tensor,
+    tgt: torch.Tensor,
+    thresholds: torch.Tensor,
+    tp: torch.Tensor,
+    fp: torch.Tensor,
+    fn: torch.Tensor,
+):
+    """Vectorized accumulate micro TP/FP/FN across batch for fixed threshold grid (prob: same device dtype)."""
+    # prob [B,H,W], tgt bool [B,H,W], thresholds [K]
+    tgt = (tgt > 0).to(torch.bool)
+    for idx, tau in enumerate(thresholds):
+        pred = (prob >= tau).to(torch.bool)
+        tp[idx] += (pred & tgt).sum()
+        fp[idx] += (pred & ~tgt).sum()
+        fn[idx] += (~pred & tgt).sum()
+
+
 def run_epoch(
     model,
     loader,
@@ -74,11 +93,26 @@ def run_epoch(
     training: bool,
     optimizer=None,
     infer_flow_steps: int = 0,
+    grad_clip_norm: float = 0.0,
+    thresh_sweep: tuple[float, ...] | None = None,
 ):
+    """
+    thresh_sweep: if set on validation-only, accumulates pooled micro pixel F1/IoU per threshold across the split
+                  (helps match tuned-threshold metrics used in papers; single forward per batch).
+    """
     model.train() if training else model.eval()
     losses = []
     pix_hist = {"acc": [], "precision": [], "recall": [], "f1": [], "iou": []}
     img_hist = {"auroc": [], "auprc": [], "best_f1": [], "best_threshold": []}
+
+    sweep_tp = sweep_fp = sweep_fn = sweep_thr_used = None
+    if (not training) and thresh_sweep is not None and len(thresh_sweep) > 0:
+        k = len(thresh_sweep)
+        sweep_tp = torch.zeros(k, device=device, dtype=torch.float64)
+        sweep_fp = torch.zeros(k, device=device, dtype=torch.float64)
+        sweep_fn = torch.zeros(k, device=device, dtype=torch.float64)
+        sweep_thr_used = tuple(float(t) for t in thresh_sweep)
+        thresh_tensor = torch.tensor(thresh_sweep, device=device, dtype=torch.float32)
 
     pbar = tqdm(loader, desc="Train" if training else "Val", leave=False)
     for batch in pbar:
@@ -89,6 +123,8 @@ def run_epoch(
                 loss = criterion(out, y, dem_chw=dem)
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
+                if grad_clip_norm and grad_clip_norm > 0:
+                    nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
                 optimizer.step()
             else:
                 out = model(
@@ -109,6 +145,12 @@ def run_epoch(
         for k in img_hist:
             img_hist[k].append(float(img[k]))
 
+        if sweep_tp is not None:
+            with torch.no_grad():
+                probs = torch.sigmoid(logits)[:, 0]
+                yt = y[:, 0]
+                _accumulate_thresh_sweep_probs(probs, yt.to(torch.bool), thresh_tensor, sweep_tp, sweep_fp, sweep_fn)
+
         pbar.set_postfix(loss=f"{losses[-1]:.4f}", f1=f"{pix_hist['f1'][-1]:.4f}", iou=f"{pix_hist['iou'][-1]:.4f}")
 
     result = {
@@ -119,7 +161,61 @@ def run_epoch(
         "image_best_f1": float(np.mean(img_hist["best_f1"])) if img_hist["best_f1"] else 0.0,
         "image_best_threshold": float(np.mean(img_hist["best_threshold"])) if img_hist["best_threshold"] else threshold,
     }
+
+    if sweep_tp is not None:
+        eps = 1e-6
+        f1_micro = (2 * sweep_tp + eps) / (2 * sweep_tp + sweep_fp + sweep_fn + eps)
+        iou_micro = (sweep_tp + eps) / (sweep_tp + sweep_fp + sweep_fn + eps)
+        k_best_i = int(torch.argmax(f1_micro).item())
+        result["pixel_f1_val_micro_thresh_sweep_best"] = float(f1_micro[k_best_i].item())
+        result["pixel_iou_val_micro_thresh_sweep_best"] = float(iou_micro[k_best_i].item())
+        result["pixel_val_best_threshold_sweep"] = float(sweep_thr_used[k_best_i])
     return result
+
+
+def score_for_best_checkpoint(val_m: dict, best_metric: str) -> float:
+    if best_metric in ("val_global_f1_sweep", "val_global_f1"):  # alias
+        return float(val_m.get("pixel_f1_val_micro_thresh_sweep_best", val_m["f1"]))
+    if best_metric == "val_iou_batch_mean":
+        return float(val_m["iou"])
+    if best_metric == "harmonic_mean":
+        pf = float(val_m.get("pixel_f1_val_micro_thresh_sweep_best", val_m["f1"]))
+        vi = float(val_m.get("pixel_iou_val_micro_thresh_sweep_best", val_m["iou"]))
+        return 2.0 * pf * vi / (pf + vi + 1e-12)
+    return float(val_m["f1"])  # val_f1_batch_mean at metric_threshold
+
+
+def package_checkpoint_state(
+    epoch_num: int,
+    model,
+    optimizer,
+    scheduler,
+    best_score: float,
+    best_checkpoint_metric: str,
+    metric_threshold: float,
+) -> dict:
+    return {
+        "epoch": epoch_num,
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict(),
+        "best_score": best_score,
+        "best_metric": best_checkpoint_metric,
+        "metric_threshold": metric_threshold,
+    }
+
+
+def build_default_thresh_sweep(start: float, end: float, step: float) -> tuple[float, ...]:
+    """Inclusive-ish grid [start, end] with floating-point safe bound."""
+    t = []
+    x = float(start)
+    guard = int(round((end - start) / step)) + 10
+    for _ in range(max(guard, 40)):
+        if x > end + step * 0.25:
+            break
+        t.append(round(float(x), 5))
+        x += step
+    return tuple(sorted(set(t)))
 
 
 def train_loop(
@@ -131,17 +227,23 @@ def train_loop(
     batch_size: int = 32,
     lr: float = 3e-4,
     weight_decay: float = 1e-4,
+    lr_scheduler_patience: int = 12,
+    lr_scheduler_factor: float = 0.5,
+    lr_scheduler_min_lr: float = 1e-7,
     num_workers: int = 8,
     device_str: str = "cuda",
-    metric_threshold: float = 0.5,
+    metric_threshold: float = 0.6,
+    grad_clip_norm: float = 5.0,
+    thresh_sweep: tuple[float, ...] | None = None,
+    best_checkpoint_metric: str = "val_global_f1_sweep",
     save_every: int = 5,
     resume: bool = False,
     fm_weight: float = 1.0,
     seg_weight: float = 2.0,
     geo_weight: float = 0.15,
     vsmooth_weight: float = 0.05,
-    tversky_alpha: float = 0.3,
-    tversky_beta: float = 0.7,
+    tversky_alpha: float = 0.6,
+    tversky_beta: float = 0.4,
     latent_sigma: float = 4.0,
     fm_residual_scale_sq: float | None = None,
     val_infer_flow_steps: int = 0,
@@ -164,7 +266,15 @@ def train_loop(
         latent_sigma=latent_sigma,
         fm_residual_scale_sq=fm_residual_scale_sq,
     )
-    optimizer = Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    optimizer = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="max",
+        factor=lr_scheduler_factor,
+        patience=lr_scheduler_patience,
+        cooldown=3,
+        min_lr=lr_scheduler_min_lr,
+    )
 
     ckpt_dir = output_dir / "checkpoint"
     results_dir = output_dir / "results"
@@ -172,15 +282,17 @@ def train_loop(
     final_csv = results_dir / "final_metrics.csv"
 
     start_epoch = 1
-    best_f1 = 0.0
+    best_score = 0.0
     if resume:
         ckpt = latest_checkpoint(ckpt_dir)
         if ckpt is not None:
             state = torch.load(ckpt, map_location=device)
             model.load_state_dict(state["model"])
             optimizer.load_state_dict(state["optimizer"])
+            if "scheduler" in state:
+                scheduler.load_state_dict(state["scheduler"])
             start_epoch = int(state["epoch"]) + 1
-            best_f1 = float(state.get("best_f1", 0.0))
+            best_score = float(state.get("best_score", state.get("best_f1", 0.0)))
 
     if debug_one_batch:
         batch = next(iter(train_loader))
@@ -200,6 +312,8 @@ def train_loop(
             training=True,
             optimizer=optimizer,
             infer_flow_steps=0,
+            grad_clip_norm=grad_clip_norm,
+            thresh_sweep=None,
         )
         val_m = run_epoch(
             model,
@@ -210,7 +324,12 @@ def train_loop(
             training=False,
             optimizer=None,
             infer_flow_steps=val_infer_flow_steps,
+            grad_clip_norm=0.0,
+            thresh_sweep=thresh_sweep,
         )
+
+        sched_ref = score_for_best_checkpoint(val_m, best_checkpoint_metric)
+        scheduler.step(sched_ref)
 
         row = {
             "epoch": epoch,
@@ -234,6 +353,10 @@ def train_loop(
             "val_auprc": val_m["auprc"],
             "val_image_best_f1": val_m["image_best_f1"],
             "val_image_best_threshold": val_m["image_best_threshold"],
+            "lr": float(optimizer.param_groups[0]["lr"]),
+            "val_pixel_f1_micro_thresh_sweep_best": val_m.get("pixel_f1_val_micro_thresh_sweep_best", float("nan")),
+            "pixel_iou_val_micro_thresh_sweep_best": val_m.get("pixel_iou_val_micro_thresh_sweep_best", float("nan")),
+            "pixel_val_best_threshold_sweep": val_m.get("pixel_val_best_threshold_sweep", float("nan")),
         }
         append_csv(epoch_csv, row)
         print(row)
@@ -241,17 +364,23 @@ def train_loop(
         if epoch % save_every == 0:
             save_checkpoint(
                 ckpt_dir / f"epoch_{epoch:04d}.pt",
-                {"epoch": epoch, "model": model.state_dict(), "optimizer": optimizer.state_dict(), "best_f1": best_f1},
+                package_checkpoint_state(
+                    epoch, model, optimizer, scheduler, best_score, best_checkpoint_metric, metric_threshold
+                ),
             )
-        if val_m["f1"] > best_f1:
-            best_f1 = val_m["f1"]
+        cand = score_for_best_checkpoint(val_m, best_checkpoint_metric)
+        if cand > best_score:
+            best_score = cand
             save_checkpoint(
                 ckpt_dir / "best.pt",
-                {"epoch": epoch, "model": model.state_dict(), "optimizer": optimizer.state_dict(), "best_f1": best_f1},
+                package_checkpoint_state(
+                    epoch, model, optimizer, scheduler, best_score, best_checkpoint_metric, metric_threshold
+                ),
             )
 
     final = {
-        "best_val_f1": best_f1,
+        "best_score": best_score,
+        "best_checkpoint_metric": best_checkpoint_metric,
         "epochs": epochs,
         "batch_size": batch_size,
         "lr": lr,
@@ -287,10 +416,20 @@ def parse_args():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--save_every", type=int, default=5)
     p.add_argument("--resume", action="store_true")
-    p.add_argument("--metric_threshold", type=float, default=0.5)
+    p.add_argument(
+        "--metric_threshold",
+        type=float,
+        default=0.6,
+        help="Fixed prob threshold for batch-mean pixel metrics (dual_stream_gated default is 0.6).",
+    )
     p.add_argument("--val_split_ratio_l4s", type=float, default=0.1)
     p.add_argument("--resize_to", type=int, default=256)
-    p.add_argument("--pyramid_width", type=int, default=48)
+    p.add_argument(
+        "--pyramid_width",
+        type=int,
+        default=64,
+        help="Encoder base width; larger helps capacity vs DiGATe EfficientNet backbones.",
+    )
     p.add_argument("--flow_combine_scale", type=float, default=0.5)
     p.add_argument("--model_flow_steps", type=int, default=0, help="Default FM integration steps at eval if --val_infer_flow_steps unset")
     p.add_argument("--val_infer_flow_steps", type=int, default=-1, help="If >=0, override eval integration steps; -1 uses model_flow_steps")
@@ -298,8 +437,32 @@ def parse_args():
     p.add_argument("--seg_weight", type=float, default=2.0)
     p.add_argument("--geo_weight", type=float, default=0.15)
     p.add_argument("--vsmooth_weight", type=float, default=0.05)
-    p.add_argument("--tversky_alpha", type=float, default=0.3)
-    p.add_argument("--tversky_beta", type=float, default=0.7)
+    p.add_argument(
+        "--tversky_alpha",
+        type=float,
+        default=0.6,
+        help="Match dual_stream_gated / paper-style emphasis (higher alpha penalizes FP more).",
+    )
+    p.add_argument("--tversky_beta", type=float, default=0.4)
+    p.add_argument("--grad_clip_norm", type=float, default=5.0, help="0 disables.")
+    p.add_argument("--lr_scheduler_patience", type=int, default=12)
+    p.add_argument("--lr_scheduler_factor", type=float, default=0.5)
+    p.add_argument("--lr_scheduler_min_lr", type=float, default=1e-7)
+    p.add_argument(
+        "--best_checkpoint_metric",
+        type=str,
+        default="val_global_f1_sweep",
+        choices=("val_global_f1_sweep", "val_f1_batch_mean", "val_iou_batch_mean", "harmonic_mean"),
+        help="Score used for best.pt and ReduceLROnPlateau. val_global_f1_sweep = pooled micro-F1 at best prob threshold on val.",
+    )
+    p.add_argument(
+        "--no_val_threshold_sweep",
+        action="store_true",
+        help="Disable val prob-threshold sweep (disables val_global_f1_sweep / harmonic_mean meaningfully).",
+    )
+    p.add_argument("--thresh_sweep_start", type=float, default=0.35)
+    p.add_argument("--thresh_sweep_end", type=float, default=0.85)
+    p.add_argument("--thresh_sweep_step", type=float, default=0.025)
     p.add_argument("--latent_sigma", type=float, default=4.0)
     p.add_argument(
         "--fm_residual_scale_sq",
@@ -342,6 +505,15 @@ def main():
         train_ds = BijieTripleStreamDataset(train_raw, resize_to=args.resize_to, transform=AugmentTripleStream(p=0.5))
         val_ds = BijieTripleStreamDataset(val_raw, resize_to=args.resize_to, transform=None)
 
+    thresh_sweep = None
+    if not args.no_val_threshold_sweep:
+        thresh_sweep = build_default_thresh_sweep(
+            args.thresh_sweep_start, args.thresh_sweep_end, args.thresh_sweep_step
+        )
+    best_metric = args.best_checkpoint_metric
+    if args.no_val_threshold_sweep and best_metric in ("val_global_f1_sweep", "harmonic_mean"):
+        best_metric = "val_f1_batch_mean"
+
     train_loop(
         model=model,
         train_ds=train_ds,
@@ -351,9 +523,15 @@ def main():
         batch_size=args.batch_size,
         lr=args.lr,
         weight_decay=args.weight_decay,
+        lr_scheduler_patience=args.lr_scheduler_patience,
+        lr_scheduler_factor=args.lr_scheduler_factor,
+        lr_scheduler_min_lr=args.lr_scheduler_min_lr,
         num_workers=args.num_workers,
         device_str=args.device,
         metric_threshold=args.metric_threshold,
+        grad_clip_norm=args.grad_clip_norm,
+        thresh_sweep=thresh_sweep,
+        best_checkpoint_metric=best_metric,
         save_every=args.save_every,
         resume=args.resume,
         fm_weight=args.fm_weight,
@@ -372,6 +550,8 @@ def main():
             "ctx_ch": ctx_ch,
             "model_flow_steps": args.model_flow_steps,
             "val_infer_flow_steps": val_steps,
+            "best_checkpoint_metric": best_metric,
+            "val_threshold_sweep_enabled": not args.no_val_threshold_sweep,
         },
     )
 

@@ -209,7 +209,7 @@ With probabilities p=\sigma(\hat{\mathbf{L}}_{aux}), flattened over pixels:
 TV = \frac{TP + \epsilon}{TP + \alpha FP + \beta FN + \epsilon}, \quad \mathcal{L}_{Tversky} = 1 - TV.
 
 
-Matches baseline choices (`--tversky_alpha`, `--tversky_beta` aligned with `[common/losses.py](../ablation_study/baseline_models/common/losses.py)`).
+CLI defaults (\(\alpha{=}0.6,\ \beta{=}0.4\), `--metric_threshold` 0.6) match [`dual_stream_gated/training.py`](../ablation_study/dual_stream_gated/training.py); you can revert toward `common` UNet defaults (0.3/0.7) if preferred.
 
 ### 7.2 Geomorphological alignment \mathcal{L}_{geo}
 
@@ -241,11 +241,15 @@ The repository’s **dual-stream gated** reference implementation lives at `[SAM
 
 ## 9. Training I/O contract (baseline parity)
 
-Trainer in `[training/train.py](training/train.py)` mirrors `[common/trainer.py::train_model](../ablation_study/baseline_models/common/trainer.py)`:
+Trainer in `[training/train.py](training/train.py)` mirrors `[common/trainer.py::train_model](../ablation_study/baseline_models/common/trainer.py)` where possible:
 
 - Layout: `{output_dir}/{dataset}/{experiment_name}/{checkpoint/,results/}`.
-- Epoch CSV `[results/epoch_metrics.csv](training/train.py)` columns: train/val `loss`, pixel `acc,precision,recall,f1,iou`, image `auroc,auprc,image_best_f1,image_best_threshold`.
-- Checkpoints `checkpoint/epoch_XXXX.pt`, `checkpoint/best.pt`; resume restores `optimizer` + `epoch` + best F1 tracker.
+- Epoch CSV `[results/epoch_metrics.csv](training/train.py)` adds **`val_pixel_f1_micro_thresh_sweep_best`**: pooled **micro** precision–recall F1 over the **entire val split**, after scanning a probability threshold grid (`--thresh_sweep_*`). This usually lies **between** pessimistic pixel metrics at fixed 0.5 and very high **`val_image_best_f1`** (instance score PR), and is a fairer number to cite next to tuned-threshold papers.
+- **`best.pt`** is chosen by **`--best_checkpoint_metric`** (default `val_global_f1_sweep`; alternatives: batch-mean `val_f1`, `val_iou_batch_mean`, or `harmonic_mean` of swept F1/IoU).
+- **Optimization**: AdamW + `ReduceLROnPlateau(max)` on that same score, **`grad_clip_norm`**, cosine-style decay of LR when stalled (not cosine time schedule).
+- Checkpoints save `scheduler` too; resume reloads it when present.
+
+**Why logs can disagree with DiGATe numbers:** The reference [`dual_stream_gated`](../ablation_study/dual_stream_gated/) backbone is **EfficientNet-B4 + ImageNet pretrain**, while TriEncoderCFMNet is a lighter custom CNN pyramid—expect gaps unless capacity/pretrain matches. Use **`--pyramid_width`** (default 64) and optional larger `--resize_to` within GPU memory if you chase paper-level scores.
 
 ## 10. How to run
 
