@@ -127,7 +127,7 @@ def train_loop(
     train_ds,
     val_ds,
     output_dir: Path,
-    epochs: int = 100,
+    epochs: int = 200,
     batch_size: int = 32,
     lr: float = 3e-4,
     weight_decay: float = 1e-4,
@@ -278,7 +278,7 @@ def parse_args():
     p.add_argument("--dataset_root", type=str, required=True)
     p.add_argument("--output_dir", type=str, default=".")
     p.add_argument("--experiment_name", type=str, default="tri_encoder_cfm")
-    p.add_argument("--epochs", type=int, default=100)
+    p.add_argument("--epochs", type=int, default=200)
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--weight_decay", type=float, default=1e-4)
