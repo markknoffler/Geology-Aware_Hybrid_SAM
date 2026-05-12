@@ -1,0 +1,6 @@
+Figure 1 (conference paper): model architecture diagram.
+This is not generated from ablation CSVs. Use your architecture schematic
+(e.g. exported from draw.io, PowerPoint, or SAM/codebase/model_architecture assets)
+and place it in the manuscript.
+
+Other conf_fig*.png files in this folder are auto-generated from summary + epoch_metrics.

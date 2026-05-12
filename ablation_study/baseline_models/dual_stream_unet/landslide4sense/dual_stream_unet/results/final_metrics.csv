@@ -1,0 +1,2 @@
+best_val_f1,epochs,batch_size,lr,weight_decay,metric_threshold,tversky_alpha,tversky_beta,main_weight,aux2_weight,aux3_weight,dataset,model_name
+0.6561854084332784,100,32,0.0003,0.0001,0.5,0.3,0.7,1.0,0.6,0.4,landslide4sense,dual_stream_unet

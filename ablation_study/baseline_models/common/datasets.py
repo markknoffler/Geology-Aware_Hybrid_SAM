@@ -371,9 +371,21 @@ class BijieTwoComposites(Dataset):
 
 
 def build_l4s_split(dataset_root: str | Path, val_ratio: float = 0.1, seed: int = 42):
-    img_dir = Path(dataset_root) / "TrainData" / "img"
+    root = Path(dataset_root)
+    img_dir = root / "TrainData" / "img"
+    if not img_dir.is_dir():
+        raise FileNotFoundError(
+            f"Landslide4Sense root looks wrong: {root}\n"
+            f"Expected directory: {img_dir}\n"
+            f"Fix --dataset_root (e.g. .../4PI/dataset with TrainData/img/*.h5)."
+        )
     files = sorted(img_dir.glob("*.h5"))
     n = len(files)
+    if n == 0:
+        raise ValueError(
+            f"No .h5 training images under {img_dir}. Check --dataset_root path "
+            f"(common mistake: typo like .../datase instead of .../dataset)."
+        )
     g = torch.Generator().manual_seed(seed)
     perm = torch.randperm(n, generator=g).tolist()
     n_val = max(1, int(round(n * val_ratio)))
