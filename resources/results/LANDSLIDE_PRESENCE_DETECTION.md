@@ -82,19 +82,34 @@ Training hyper-parameters are aligned with `final_metrics.csv` in each run (e.g.
 
 ## 4. How to run (your server)
 
-```bash
-export BIJIE_ROOT=/path/to/Bijie-landslide-dataset
-export L4S_ROOT=/path/to/Landslide4Sense
+**Repo layout A** — `Geology-Aware_Hybrid_SAM` (no `SAM/` prefix): `resources/`, `runs/`, `model_architecture_cfm_landseg/` at repo root.
 
-bash SAM/resources/results/run_landslide_presence_eval.sh
+**Repo layout B** — `CSIR_NEIST`: everything under `SAM/`.
+
+```bash
+cd ~/Desktop/Deep_learning_projects/CSIR/Geology-Aware_Hybrid_SAM   # your clone
+
+export BIJIE_ROOT=/home/user/Desktop/Deep_learning_projects/4PI/dataset_bijie_landslide
+export L4S_ROOT=/home/user/Desktop/Deep_learning_projects/4PI/dataset
+
+bash resources/results/run_landslide_presence_eval.sh
 ```
 
-Or directly:
+Requires **`model_architecture_cfm_landseg/eval/eval_landslide_presence.py`** in the repo (not only the shell script). If missing, `git pull` or copy that folder from the branch that added it.
+
+Layout B equivalent: `bash SAM/resources/results/run_landslide_presence_eval.sh` from the CSIR_NEIST root.
+
+Direct Python (layout A):
 
 ```bash
-python3 SAM/model_architecture_cfm_landseg/eval/eval_landslide_presence.py \
+python3 model_architecture_cfm_landseg/eval/eval_landslide_presence.py \
   --bijie-root "$BIJIE_ROOT" \
   --l4s-root "$L4S_ROOT" \
+  --bijie-summary resources/results/bijie_ablation_report/bijie_best_validation_summary.csv \
+  --l4s-summary resources/results/l4s_ablation_report/landslide4sense_best_validation_summary.csv \
+  --bijie-run-dir runs/bijie/tri_encoder_cfm_v2 \
+  --l4s-run-dir runs/landslide4sense/tri_encoder_cfm_v2 \
+  --output-dir resources/results/landslide_presence_report \
   --device cuda \
   --batch-size 16
 ```
