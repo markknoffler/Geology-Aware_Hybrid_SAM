@@ -1,0 +1,5 @@
+Fig. 1 — Model architecture design (conference_remotesensing_landslide.pdf)
+
+This figure is not produced from epoch_metrics or the summary CSV. Export your
+architecture diagram from your drawing tool or reuse assets under
+SAM/codebase/model_architecture/ and insert it in the manuscript.

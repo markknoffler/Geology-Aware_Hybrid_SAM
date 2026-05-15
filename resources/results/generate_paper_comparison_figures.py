@@ -3,8 +3,9 @@
 Publication-oriented comparison figures from an ablation summary CSV.
 
 Expected input: CSV written by build_l4s_ablation_report.py with columns
-rank, model_id, display_name, best_epoch, val_*, and source_csv (path to
-epoch_metrics*.csv per model).
+model_id, display_name, best_epoch, val_acc, val_precision, val_recall,
+val_f1, val_iou (no source_csv in the file). Epoch log paths are resolved at
+run time via the same scan as the report builder.
 
 Typical workflow:
   python build_l4s_ablation_report.py --dataset landslide4sense --output-dir ./out
@@ -15,25 +16,26 @@ Outputs two families of PNGs in the same output directory:
 **Generic comparison set** (fig01–fig09): overlays, grouped bars, heatmap,
 radar, scatter (see --help).
 
-**Conference paper figures** (same numbering as
-`SAM/resources/docs/conference_remotesensing_landslide.pdf`) are written to
-`<output-dir>/conference_remotesensing_landslide/` as `Fig02_*.png` … `Fig14_*.png`
+**Conference paper figures** (same numbering as the Landslide4Sense PDF bundle) are written to
+`<output-dir>/<conference-subdir>/` as `Fig02_*.png` … `Fig13_*.png`
 with captions taken from that PDF. Fig. 1 is architecture-only (see
 `Fig01_model_architecture_NOTE.txt` in that folder).
 
+  - Default `conference-subdir`: `conference_remotesensing_landslide` for L4S summaries,
+    `conference_bijie` when the summary CSV filename contains `bijie` (override with `--conference-subdir`).
+
   - Fig. 1 — architecture (not from CSV)
-  - Fig. 2 / 5 — training / validation metric heatmaps vs epoch (focus model)
+  - Fig. 2 / 5 — training / validation dynamics for the focus model (wide horizontal layouts;
+    Fig. 5 overlays the former Fig. 7 train–vs–validation bar summary on the validation heatmap).
   - Fig. 3 / 6 — train–validation curve panels (focus model)
   - Fig. 4 — final performance summary (all models in summary CSV, best epoch)
-  - Fig. 7 — final performance summary: Training vs Validation grouped bars
-    (precision, recall, accuracy) at the focus model’s best epoch (paper layout).
-  - Fig. 8–10 / 11–13 — paper shows ROC/PR *curves* at epochs 24, 34, 39; logs
+  - Fig. 7–9 / 10–12 — paper shows ROC/PR *curves* at epochs 24, 34, 39; logs
     only provide scalar val_auroc / val_auprc per epoch — plots mark those epochs
     (export threshold sweeps for true curves).
-  - Fig. 14 — precision vs recall **grouped bar chart** for every model in the
+  - Fig. 13 — precision vs recall **grouped bar chart** for every model in the
     summary CSV (paper-style caption; publication theme).
 
-Use --no-conference to skip the `conference_remotesensing_landslide/` bundle.
+Use --no-conference to skip the conference figure bundle (Fig.1 note + Fig.2–13).
 Use --focus-model-id and --paper-epochs to match your runs.
 """
 
@@ -41,9 +43,20 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
+
+_RESULTS_DIR = Path(__file__).resolve().parent
+if str(_RESULTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_RESULTS_DIR))
+
+from build_l4s_ablation_report import (
+    collect_best_models,
+    default_exclude_substrings,
+    discover_sam_root,
+)
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -60,17 +73,14 @@ FIG_COLORS = (
     "#000000",
 )
 
-METRIC_KEYS_HEAT = (
-    "val_acc",
-    "val_precision",
-    "val_recall",
-    "val_f1",
-    "val_iou",
-    "val_auroc",
-    "val_auprc",
+# Summary CSV omits val_auroc / val_auprc; heatmap uses whichever val_* columns are present.
+HEATMAP_METRICS = (
+    ("val_acc", "Acc"),
+    ("val_precision", "Prec"),
+    ("val_recall", "Rec"),
+    ("val_f1", "F1"),
+    ("val_iou", "IoU"),
 )
-
-HEAT_LABELS = ("Acc", "Prec", "Rec", "F1", "IoU", "AUROC", "AUPRC")
 
 
 def to_float(v: str, default: float = float("nan")) -> float:
@@ -85,13 +95,49 @@ def read_csv_rows(path: Path) -> List[Dict[str, str]]:
         return list(csv.DictReader(f))
 
 
+def _infer_dataset_scan_key(summary_csv: Path) -> str:
+    return "bijie" if "bijie" in summary_csv.name.lower() else "landslide4sense"
+
+
+def _source_csv_by_model_id(summary_csv: Path) -> Dict[str, Path]:
+    root = discover_sam_root()
+    dataset = _infer_dataset_scan_key(summary_csv)
+    models = collect_best_models(root, dataset, default_exclude_substrings())
+    out: Dict[str, Path] = {}
+    for m in models:
+        out[m.model_id] = m.source_csv
+        out[m.model_id.lower()] = m.source_csv
+    return out
+
+
+def _attach_source_csv(rows: List[Dict[str, str]], summary_path: Path) -> None:
+    """Ensure every row has a resolvable source_csv (epoch log) for plotting."""
+    by_id = _source_csv_by_model_id(summary_path)
+    for row in rows:
+        p = (row.get("source_csv") or "").strip()
+        if p:
+            exp = Path(p).expanduser()
+            if exp.is_file():
+                row["source_csv"] = str(exp.resolve())
+                continue
+        mid = (row.get("model_id") or "").strip()
+        src = by_id.get(mid) or by_id.get(mid.lower())
+        if src is None:
+            raise SystemExit(
+                f"Cannot resolve epoch log for model_id={mid!r} from {summary_path}. "
+                "Re-run build_l4s_ablation_report.py for this dataset or fix model_id spelling."
+            )
+        row["source_csv"] = str(src.resolve())
+
+
 def read_summary(path: Path) -> List[Dict[str, str]]:
     rows = read_csv_rows(path)
     if not rows:
         raise SystemExit(f"Empty summary CSV: {path}")
-    need = {"display_name", "source_csv", "val_f1"}
+    need = {"model_id", "display_name", "val_f1"}
     if not need.issubset(rows[0].keys()):
         raise SystemExit(f"Summary CSV missing columns {need}; got {list(rows[0].keys())}")
+    _attach_source_csv(rows, path)
     return rows
 
 
@@ -106,6 +152,30 @@ def last_row_per_epoch(rows: Sequence[Dict[str, str]]) -> List[Dict[str, str]]:
             continue
         by_ep[ep] = r
     return [by_ep[k] for k in sorted(by_ep)]
+
+
+# Columns that must never be treated as plottable metric series (e.g. Bijie / WandB exports).
+_SKIP_SERIES_COLUMNS = frozenset(
+    {
+        "test_loss",
+        "step",
+        "epoch",
+        "train_loss",
+        "val_loss",
+        "epoch_time",
+        "val_pixel_f1_micro_thresh_sweep_best",
+        "pixel_iou_val_micro_thresh_sweep_best",
+        "pixel_val_best_threshold_sweep",
+        "f1 score (non-landslide)",
+        "iou (non-landslide)",
+        "f1 score (landslide)",
+    }
+)
+
+
+def _skip_series_column(name: str) -> bool:
+    n = name.strip().lower()
+    return n in _SKIP_SERIES_COLUMNS
 
 
 def load_series(source_csv: Path) -> Optional[Tuple[np.ndarray, Dict[str, np.ndarray]]]:
@@ -144,7 +214,7 @@ def load_series_all_keys(source_csv: Path) -> Optional[Tuple[np.ndarray, Dict[st
     skip_substrings = ("image_best", "threshold")
     series: Dict[str, np.ndarray] = {}
     for col in rows[0].keys():
-        if col == "epoch":
+        if _skip_series_column(col):
             continue
         if any(s in col for s in skip_substrings):
             continue
@@ -189,11 +259,13 @@ def pick_focus_row(summary: List[Dict[str, str]], focus_id: Optional[str]) -> Di
 
 
 def write_fig01_architecture_note(out_path: Path) -> None:
-    text = """Fig. 1 — Model architecture design (conference_remotesensing_landslide.pdf)
+    text = f"""Fig. 1 — Model architecture design
 
 This figure is not produced from epoch_metrics or the summary CSV. Export your
 architecture diagram from your drawing tool or reuse assets under
-SAM/codebase/model_architecture/ and insert it in the manuscript.
+SAM/codebase/model_architecture/ and insert in the manuscript.
+
+Output bundle folder for this run: {out_path.parent.name}/
 """
     out_path.write_text(text, encoding="utf-8")
 
@@ -213,7 +285,8 @@ def conf_fig02_training_heatmap(focus_csv: Path, out_path: Path, caption: str, s
     mat = np.column_stack([ser[c] for c in cols])
     mat_n = column_normalize_01(mat)
     nice = [c.replace("train_", "").replace("_", " ").title() for c in cols]
-    fig, ax = plt.subplots(figsize=(9.5, max(4.5, len(ep) * 0.12)))
+    fig_h = max(3.6, len(ep) * 0.055)
+    fig, ax = plt.subplots(figsize=(15.2, fig_h))
     im = ax.imshow(mat_n, aspect="auto", cmap="magma", vmin=0.0, vmax=1.0)
     ax.set_xticks(np.arange(len(nice)))
     ax.set_xticklabels(nice, rotation=35, ha="right", fontsize=8)
@@ -239,7 +312,8 @@ def conf_fig05_validation_heatmap(focus_csv: Path, out_path: Path, caption: str,
     mat = np.column_stack([ser[c] for c in cols])
     mat_n = column_normalize_01(mat)
     nice = [c.replace("val_", "").replace("_", " ").title() for c in cols]
-    fig, ax = plt.subplots(figsize=(9.5, max(4.5, len(ep) * 0.12)))
+    fig_h = max(3.6, len(ep) * 0.055)
+    fig, ax = plt.subplots(figsize=(15.2, fig_h))
     im = ax.imshow(mat_n, aspect="auto", cmap="viridis", vmin=0.0, vmax=1.0)
     ax.set_xticks(np.arange(len(nice)))
     ax.set_xticklabels(nice, rotation=35, ha="right", fontsize=8)
@@ -255,24 +329,49 @@ def conf_fig05_validation_heatmap(focus_csv: Path, out_path: Path, caption: str,
 
 
 def conf_fig03_train_val_panel(focus_csv: Path, out_path: Path, caption: str, subtitle: str) -> None:
-    """Fig. 3 style: train vs validation curves (loss, acc, F1, IoU)."""
+    """Fig. 3 style: train vs validation curves (loss if logged, else acc / F1 / IoU only)."""
+    raw = read_csv_rows(focus_csv)
+    rows = last_row_per_epoch(raw)
+    if not rows:
+        return
+    ep = np.asarray([to_float(r["epoch"], np.nan) for r in rows], dtype=float)
     loaded = load_series_all_keys(focus_csv)
     if loaded is None:
         return
-    ep, ser = loaded
-    pairs = [
-        ("train_loss", "val_loss", "Loss"),
-        ("train_acc", "val_acc", "Accuracy"),
-        ("train_f1", "val_f1", "F1"),
-        ("train_iou", "val_iou", "IoU"),
-    ]
-    fig, axes = plt.subplots(2, 2, figsize=(10.5, 8.0), sharex=True)
-    axes_flat = axes.ravel()
+    _, ser = loaded
+    ser_plot: Dict[str, np.ndarray] = dict(ser)
+    if "train_loss" in rows[0] and "val_loss" in rows[0]:
+        tl = np.asarray([to_float(r.get("train_loss", "nan")) for r in rows], dtype=float)
+        vl = np.asarray([to_float(r.get("val_loss", "nan")) for r in rows], dtype=float)
+        if np.any(np.isfinite(tl)) or np.any(np.isfinite(vl)):
+            ser_plot["train_loss"] = tl
+            ser_plot["val_loss"] = vl
+    pairs: List[Tuple[str, str, str]] = []
+    if "train_loss" in ser_plot and "val_loss" in ser_plot:
+        if np.any(np.isfinite(ser_plot["train_loss"])) or np.any(np.isfinite(ser_plot["val_loss"])):
+            pairs.append(("train_loss", "val_loss", "Loss"))
+    pairs.extend(
+        [
+            ("train_acc", "val_acc", "Accuracy"),
+            ("train_f1", "val_f1", "F1"),
+            ("train_iou", "val_iou", "IoU"),
+        ]
+    )
+    n = len(pairs)
+    if n == 4:
+        fig, axes = plt.subplots(2, 2, figsize=(10.5, 8.0), sharex=True)
+        axes_flat = axes.ravel()
+    elif n == 3:
+        fig, axes = plt.subplots(1, 3, figsize=(14.0, 4.6), sharex=True)
+        axes_flat = axes
+    else:
+        fig, axes = plt.subplots(1, max(1, n), figsize=(max(8.0, 4.2 * n), 4.4), sharex=True)
+        axes_flat = np.atleast_1d(axes)
     for ax, (tk, vk, title) in zip(axes_flat, pairs):
-        if tk in ser:
-            ax.plot(ep, ser[tk], label="Train", color="#009E73", linewidth=1.5)
-        if vk in ser:
-            ax.plot(ep, ser[vk], label="Val", color="#D55E00", linewidth=1.5)
+        if tk in ser_plot:
+            ax.plot(ep, ser_plot[tk], label="Train", color="#009E73", linewidth=1.5)
+        if vk in ser_plot:
+            ax.plot(ep, ser_plot[vk], label="Val", color="#D55E00", linewidth=1.5)
         ax.set_title(title)
         _style_axes(ax)
         ax.set_xlabel("Epoch")
@@ -435,6 +534,135 @@ def conf_fig07_final_bars_train_val(
         fig.text(0.5, 0.01, _caption_lines(caption, subtitle), ha="center", fontsize=9, color="#333333")
 
         fig.tight_layout(rect=(0, 0.06, 1, 1))
+        fig.savefig(out_path, bbox_inches="tight", facecolor=fig.get_facecolor())
+        plt.close(fig)
+
+
+def conf_fig05_validation_heatmap_with_train_val_bars_horizontal(
+    focus: Dict[str, str],
+    focus_csv: Path,
+    out_path: Path,
+    caption: str,
+    subtitle: str,
+) -> None:
+    """
+    Wide Fig. 5: validation metric heatmap (left) + training vs validation bars
+    for precision, recall, and accuracy at best epoch (right; former Fig. 7 layout).
+    """
+    loaded = load_series_all_keys(focus_csv)
+    if loaded is None:
+        return
+    ep, ser = loaded
+    cols = [c for c in sorted(ser) if c.startswith("val_")]
+    if not cols:
+        return
+    mat = np.column_stack([ser[c] for c in cols])
+    mat_n = column_normalize_01(mat)
+    nice = [c.replace("val_", "").replace("_", " ").title() for c in cols]
+
+    best_ep = int(float(focus.get("best_epoch", "-1")))
+    rows_lv = last_row_per_epoch(read_csv_rows(focus_csv))
+    row: Dict[str, str] | None = None
+    for r in rows_lv:
+        if int(to_float(r.get("epoch", "-1"), -1)) == best_ep:
+            row = r
+            break
+    if row is None and rows_lv:
+        row = rows_lv[-1]
+    if row is None:
+        return
+
+    def g(key: str) -> float:
+        return to_float(row.get(key, "nan"))
+
+    tp, vp = g("train_precision"), g("val_precision")
+    tr, vr = g("train_recall"), g("val_recall")
+    ta, va = g("train_acc"), g("val_acc")
+    if not all(np.isfinite(v) for v in (tp, vp, tr, vr, ta, va)):
+        return
+
+    h_heat = max(4.0, len(ep) * 0.052)
+    with _publication_style_context():
+        fig = plt.figure(figsize=(17.2, h_heat))
+        gs = fig.add_gridspec(1, 2, width_ratios=[1.72, 1.0], wspace=0.28)
+        ax0 = fig.add_subplot(gs[0, 0])
+        ax1 = fig.add_subplot(gs[0, 1])
+        fig.patch.set_facecolor("#fdfdfd")
+
+        im = ax0.imshow(mat_n, aspect="auto", cmap="viridis", vmin=0.0, vmax=1.0)
+        ax0.set_xticks(np.arange(len(nice)))
+        ax0.set_xticklabels(nice, rotation=28, ha="right", fontsize=7.5)
+        _yt = np.linspace(0, len(ep) - 1, num=min(12, len(ep))).astype(int)
+        ax0.set_yticks(_yt)
+        ax0.set_yticklabels([str(int(ep[i])) for i in _yt], fontsize=8)
+        ax0.set_ylabel("Epoch")
+        ax0.set_title("Validation metrics (heatmap)", fontsize=10.5, fontweight="600")
+        fig.colorbar(im, ax=ax0, fraction=0.046, pad=0.02, label="Norm. scale (per column)")
+
+        ax1.set_facecolor("#f4f5f7")
+        xb = np.arange(2, dtype=float)
+        w = 0.24
+        b0 = ax1.bar(
+            xb - w,
+            [tp, vp],
+            w,
+            label="Precision",
+            color=FIG07_COL_PRECISION,
+            edgecolor="white",
+            linewidth=1.0,
+            zorder=3,
+        )
+        b1 = ax1.bar(
+            xb,
+            [tr, vr],
+            w,
+            label="Recall",
+            color=FIG07_COL_RECALL,
+            edgecolor="white",
+            linewidth=1.0,
+            zorder=3,
+        )
+        b2 = ax1.bar(
+            xb + w,
+            [ta, va],
+            w,
+            label="Accuracy",
+            color=FIG07_COL_ACCURACY,
+            edgecolor="#5c4d2a",
+            linewidth=0.35,
+            zorder=3,
+        )
+        for bars in (b0, b1, b2):
+            for b in bars:
+                h = b.get_height()
+                if np.isfinite(h):
+                    ax1.text(
+                        b.get_x() + b.get_width() / 2.0,
+                        h + 0.02,
+                        f"{h:.3f}",
+                        ha="center",
+                        va="bottom",
+                        fontsize=7.5,
+                        color="#2b2b2b",
+                    )
+        ax1.set_xticks(xb)
+        ax1.set_xticklabels(["Training", "Validation"], fontsize=10)
+        ax1.set_ylabel("Score", fontsize=10)
+        ax1.set_ylim(0.0, 1.12)
+        ax1.set_title(
+            f"Train vs val at best epoch ({best_ep})",
+            fontsize=10.5,
+            fontweight="600",
+            pad=10,
+        )
+        ax1.legend(loc="lower center", ncol=3, frameon=True, fancybox=False, edgecolor="#cccccc", fontsize=7.5)
+        ax1.yaxis.grid(True, linestyle="-", alpha=0.45)
+        ax1.set_axisbelow(True)
+        for spine in ("top", "right"):
+            ax1.spines[spine].set_visible(False)
+
+        fig.suptitle(_caption_lines(caption, subtitle), fontsize=11.5, fontweight="600", y=0.98)
+        fig.tight_layout(rect=(0, 0.02, 1, 0.94))
         fig.savefig(out_path, bbox_inches="tight", facecolor=fig.get_facecolor())
         plt.close(fig)
 
@@ -604,8 +832,18 @@ def conf_fig14_precision_recall_grouped_bars(
         plt.close(fig)
 
 
-# Subfolder and filenames aligned with conference_remotesensing_landslide.pdf
-CONFERENCE_PAPER_SUBDIR = "conference_remotesensing_landslide"
+# Default subfolder for PDF-aligned figure bundle (Landslide4Sense). Bijie uses
+# `conference_bijie` unless overridden by --conference-subdir.
+DEFAULT_CONFERENCE_PAPER_SUBDIR = "conference_remotesensing_landslide"
+BIJIE_CONFERENCE_PAPER_SUBDIR = "conference_bijie"
+
+
+def resolve_conference_paper_subdir(summary_csv: Path, explicit: str) -> str:
+    if explicit.strip():
+        return explicit.strip()
+    if "bijie" in summary_csv.name.lower():
+        return BIJIE_CONFERENCE_PAPER_SUBDIR
+    return DEFAULT_CONFERENCE_PAPER_SUBDIR
 
 
 def generate_conference_figures(
@@ -614,19 +852,19 @@ def generate_conference_figures(
     label: str,
     focus: Dict[str, str],
     paper_epochs: List[int],
+    conference_paper_subdir: str,
 ) -> None:
     """
-    Figures 1–14 as listed in SAM/resources/docs/conference_remotesensing_landslide.pdf
-    (captions taken from PDF text extraction). Outputs go under
-    out_dir / conference_remotesensing_landslide /.
+    Figures 1–13 bundle (same filenames as the Landslide4Sense conference set).
+    Outputs go under ``out_dir / conference_paper_subdir /``.
     """
-    paper_dir = out_dir / CONFERENCE_PAPER_SUBDIR
+    paper_dir = out_dir / conference_paper_subdir
     paper_dir.mkdir(parents=True, exist_ok=True)
     write_fig01_architecture_note(paper_dir / "Fig01_model_architecture_NOTE.txt")
 
     fcsv = Path(focus["source_csv"]).expanduser()
     dname = focus.get("display_name") or focus.get("model_id", "focus")
-    sub_common = f"Landslide4Sense summary CSV · focus run: {dname}"
+    sub_common = f"{label} · summary CSV · focus run: {dname}"
 
     # PDF captions (verbatim where noted)
     conf_fig02_training_heatmap(
@@ -647,11 +885,12 @@ def generate_conference_figures(
         "Fig. 4. Final performance summary for segmentation model",
         f"All models in summary table (best validation epoch). {label}.",
     )
-    conf_fig05_validation_heatmap(
+    conf_fig05_validation_heatmap_with_train_val_bars_horizontal(
+        focus,
         fcsv,
         paper_dir / "Fig05_performance_heatmap_segmentation_model_validation.png",
-        "Fig. 5. Performance heatmap for segmentation model",
-        sub_common + " · validation metrics vs epoch",
+        "Fig. 5. Performance heatmap for segmentation model (validation) with train–validation summary bars",
+        sub_common + " · wide layout: heatmap + precision/recall/accuracy at best epoch",
     )
     conf_fig06_prec_rec_auroc_panel(
         fcsv,
@@ -659,20 +898,13 @@ def generate_conference_figures(
         "Fig. 6. Training validation comparison for segmentation model",
         sub_common,
     )
-    conf_fig07_final_bars_train_val(
-        focus,
-        fcsv,
-        paper_dir / "Fig07_final_performance_summary_segmentation_model.png",
-        "Fig. 7. final performance summary for segmentation model",
-        f"Best epoch {focus.get('best_epoch', '')} · focus model: {dname}",
-    )
 
     pe = list(paper_epochs)
     while len(pe) < 3:
         pe.append(pe[-1] if pe else 24)
     roc_epochs = pe[:3]
     for i, e in enumerate(roc_epochs):
-        fig_n = 8 + i
+        fig_n = 7 + i
         conf_scalar_epoch_plot(
             fcsv,
             paper_dir / f"Fig{fig_n:02d}_ROC_curve_epoch_{e}.png",
@@ -683,7 +915,7 @@ def generate_conference_figures(
             e,
         )
     for i, e in enumerate(roc_epochs):
-        fig_n = 11 + i
+        fig_n = 10 + i
         conf_scalar_epoch_plot(
             fcsv,
             paper_dir / f"Fig{fig_n:02d}_PR_curve_epoch_{e}.png",
@@ -696,8 +928,8 @@ def generate_conference_figures(
 
     conf_fig14_precision_recall_grouped_bars(
         summary_ordered,
-        paper_dir / "Fig14_precision_recall_comparison_all_segmentation_models.png",
-        "Fig. 14. Precision-Recall comparision of all the segmentation models",
+        paper_dir / "Fig13_precision_recall_comparison_all_segmentation_models.png",
+        "Fig. 13. Precision-Recall comparision of all the segmentation models",
         f"Validation metrics at best epoch per model · {label}.",
     )
 
@@ -827,8 +1059,8 @@ def fig_radar(
         reverse=True,
     )
     pick = sorted_rows[: max_models]
-    cand_labels = ("F1", "IoU", "Prec.", "Rec.", "AUROC")
-    cand_keys = ("val_f1", "val_iou", "val_precision", "val_recall", "val_auroc")
+    cand_labels = ("F1", "IoU", "Prec.", "Rec.", "Acc.")
+    cand_keys = ("val_f1", "val_iou", "val_precision", "val_recall", "val_acc")
     keys: List[str] = []
     labels: List[str] = []
     for k, lab in zip(cand_keys, cand_labels):
@@ -859,15 +1091,24 @@ def fig_radar(
 
 
 def fig_heatmap(summary: List[Dict[str, str]], out_path: Path, dataset_label: str) -> None:
+    keys = [
+        k
+        for k, _ in HEATMAP_METRICS
+        if summary and any(np.isfinite(to_float(r.get(k, "nan"))) for r in summary)
+    ]
+    labels = [lab for k, lab in HEATMAP_METRICS if k in keys]
+    if not keys:
+        keys = ["val_f1", "val_iou", "val_precision", "val_recall"]
+        labels = ["F1", "IoU", "Prec", "Rec"]
     mat = []
     for row in summary:
-        mat.append([to_float(row.get(k, "nan")) for k in METRIC_KEYS_HEAT])
+        mat.append([to_float(row.get(k, "nan")) for k in keys])
     data = np.asarray(mat, dtype=float)
     data = np.ma.masked_where(~np.isfinite(data), data)
     fig, ax = plt.subplots(figsize=(8.8, max(4.8, len(summary) * 0.34)))
     im = ax.imshow(data, aspect="auto", cmap="viridis", vmin=0.0, vmax=1.0)
-    ax.set_xticks(np.arange(len(HEAT_LABELS)))
-    ax.set_xticklabels(HEAT_LABELS, rotation=30, ha="right")
+    ax.set_xticks(np.arange(len(labels)))
+    ax.set_xticklabels(labels, rotation=30, ha="right")
     ax.set_yticks(np.arange(len(summary)))
     ax.set_yticklabels([r.get("display_name", "") for r in summary])
     ax.set_title(f"{dataset_label}: validation metrics matrix (best epoch)")
@@ -1027,7 +1268,17 @@ def main() -> None:
     parser.add_argument(
         "--no-conference",
         action="store_true",
-        help="Skip conf_fig01–conf_fig14 (conference template) outputs.",
+        help="Skip conference-template outputs (Fig.1 note + Fig.2–Fig.13 bundle).",
+    )
+    parser.add_argument(
+        "--conference-subdir",
+        type=str,
+        default="",
+        help=(
+            "Subfolder under --output-dir for the PDF-style figure bundle. "
+            "Default: conference_remotesensing_landslide for L4S summaries; "
+            "conference_bijie when the summary CSV filename contains 'bijie'."
+        ),
     )
     args = parser.parse_args()
     summary_path = args.summary_csv.expanduser().resolve()
@@ -1082,18 +1333,22 @@ def main() -> None:
         paper_eps = [int(x.strip()) for x in args.paper_epochs.split(",") if x.strip()]
         if not paper_eps:
             paper_eps = [24, 34, 39]
-        generate_conference_figures(summary_ordered, out_dir, label, focus, paper_eps)
+        conf_subdir = resolve_conference_paper_subdir(summary_path, args.conference_subdir)
+        generate_conference_figures(
+            summary_ordered, out_dir, label, focus, paper_eps, conf_subdir
+        )
         print(
-            f"PDF-aligned figures (Fig.1 note + Fig.2–Fig.14): {out_dir / CONFERENCE_PAPER_SUBDIR}"
+            f"PDF-aligned figures (Fig.1 note + Fig.2–Fig.13): {out_dir / conf_subdir}"
         )
 
     print(f"Saved figures under: {out_dir}")
-    pdf_dir = out_dir / CONFERENCE_PAPER_SUBDIR
+    conf_subdir_resolved = resolve_conference_paper_subdir(summary_path, args.conference_subdir)
+    pdf_dir = out_dir / conf_subdir_resolved
     for p in sorted(out_dir.glob("fig*.png")):
         print(" ", p.name)
     if pdf_dir.is_dir():
         for p in sorted(pdf_dir.glob("Fig*.png")) + sorted(pdf_dir.glob("Fig*.txt")):
-            print(" ", CONFERENCE_PAPER_SUBDIR + "/" + p.name)
+            print(" ", conf_subdir_resolved + "/" + p.name)
 
 
 if __name__ == "__main__":

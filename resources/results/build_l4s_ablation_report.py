@@ -3,9 +3,17 @@
 Build ablation summary CSV from epoch-metrics logs (Landslide4Sense or Bijie).
 
 This script:
-1) scans `epoch_metrics*.csv` logs under SAM,
+1) scans `epoch_metrics*.csv` logs under SAM (dataset-specific roots),
 2) picks each architecture's best validation epoch (tie-break IoU → Acc),
 3) writes a consolidated ranked CSV.
+
+Bijie scan includes:
+  - `ablation_study/baseline_models/*/bijie/*/results/epoch_metrics*.csv`
+  - `ablation_study/dual_stream_gated/**` paths tagged as Bijie (e.g. `outputs_bijie/.../epoch_metrics_bijie.csv`)
+  - `runs/bijie/*/results/epoch_metrics*.csv` (e.g. TriEncoderCFMNet)
+
+Row ordering matches Landslide4Sense: baselines by val_f1, then `dual_stream_gated` directly above
+`tri_encoder_cfm*` / model_architecture runs.
 
 Simple legacy bar/scatter plots are optional (--legacy-simple-plots). For
 paper-style overlays, heatmaps, and radar diagrams, run after the CSV exists:
@@ -13,7 +21,7 @@ paper-style overlays, heatmaps, and radar diagrams, run after the CSV exists:
     python SAM/resources/results/generate_paper_comparison_figures.py \\
         --summary-csv <your_summary.csv>
 
-See that script's `--help` for output figure list.
+See that script's `--help` for output figure list (use `conference_bijie/` bundle for Bijie by default).
 """
 
 from __future__ import annotations
@@ -34,8 +42,6 @@ NUMERIC_COLS = (
     "val_recall",
     "val_f1",
     "val_iou",
-    "val_auroc",
-    "val_auprc",
 )
 
 OUR_MODEL_KEYS = ("tri_encoder_cfm", "model_architecture_cfm_landseg")
@@ -165,20 +171,9 @@ def scan_epoch_csvs(
     dataset = dataset.lower().strip()
     if dataset == "landslide4sense":
         return _scan_l4s_focused(root, exclude_substrings)
-    out: List[Path] = []
-    for p in root.rglob("*.csv"):
-        name = p.name.lower()
-        if "epoch_metrics" not in name:
-            continue
-        if dataset == "bijie":
-            if not is_bijie_csv(p):
-                continue
-        else:
-            raise ValueError(f"Unknown dataset: {dataset}")
-        if should_exclude_path(p, exclude_substrings):
-            continue
-        out.append(p)
-    return sorted(set(out))
+    if dataset == "bijie":
+        return _scan_bijie_focused(root, exclude_substrings)
+    raise ValueError(f"Unknown dataset: {dataset}")
 
 
 def _scan_l4s_focused(sam_root: Path, exclude_substrings: Sequence[str]) -> List[Path]:
@@ -211,6 +206,33 @@ def _scan_l4s_focused(sam_root: Path, exclude_substrings: Sequence[str]) -> List
     return sorted(out)
 
 
+def _scan_bijie_focused(sam_root: Path, exclude_substrings: Sequence[str]) -> List[Path]:
+    """
+    Bijie: same layout idea as L4S — only baseline_models (bijie runs), dual_stream_gated
+    (e.g. outputs_bijie/results/epoch_metrics_bijie.csv), and runs/bijie/*.
+
+    Avoids a repo-wide rglob under SAM (slow and noisy).
+    """
+    roots: List[Path] = [
+        sam_root / "ablation_study" / "baseline_models",
+        sam_root / "ablation_study" / "dual_stream_gated",
+        sam_root / "runs" / "bijie",
+    ]
+    out: Set[Path] = set()
+    for base in roots:
+        if not base.is_dir():
+            continue
+        for p in base.rglob("*.csv"):
+            if "epoch_metrics" not in p.name.lower():
+                continue
+            if not is_bijie_csv(p):
+                continue
+            if should_exclude_path(p, exclude_substrings):
+                continue
+            out.add(p.resolve())
+    return sorted(out)
+
+
 def collect_best_models(
     root: Path,
     dataset: str,
@@ -225,7 +247,11 @@ def collect_best_models(
 
         model_id = normalize_model_name(csv_path)
         epoch = int(to_float(best.get("epoch", "0"), 0))
-        metrics = {k: to_float(best.get(k, "nan")) for k in NUMERIC_COLS}
+        metrics = {
+            k: to_float(best.get(k, "nan"))
+            for k in best
+            if isinstance(k, str) and k.startswith("val_")
+        }
         rec = ModelBest(
             model_id=model_id,
             display_name=prettify_model_name(model_id),
@@ -285,7 +311,6 @@ def write_summary_csv(rows: List[ModelBest], out_csv: Path) -> None:
         "display_name",
         "best_epoch",
         *NUMERIC_COLS,
-        "source_csv",
     ]
     with out_csv.open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=headers)
@@ -295,7 +320,6 @@ def write_summary_csv(rows: List[ModelBest], out_csv: Path) -> None:
                 "model_id": r.model_id,
                 "display_name": r.display_name,
                 "best_epoch": r.best_epoch,
-                "source_csv": str(r.source_csv),
             }
             row.update({k: r.metrics.get(k, float("nan")) for k in NUMERIC_COLS})
             w.writerow(row)
@@ -305,13 +329,13 @@ def _metric_values(rows: Sequence[ModelBest], metric: str) -> np.ndarray:
     return np.asarray([r.metrics.get(metric, np.nan) for r in rows], dtype=float)
 
 
-def plot_metric_bar(rows: List[ModelBest], metric: str, ylabel: str, out_png: Path) -> None:
+def plot_metric_bar(rows: List[ModelBest], metric: str, ylabel: str, out_png: Path, dataset_label: str) -> None:
     vals = _metric_values(rows, metric)
     labels = [r.display_name for r in rows]
     x = np.arange(len(rows))
     fig, ax = plt.subplots(figsize=(max(10, len(rows) * 0.9), 6))
     bars = ax.bar(x, vals, color="#3B82F6", alpha=0.9)
-    ax.set_title(f"Landslide4Sense Best-Epoch {metric}", fontweight="bold")
+    ax.set_title(f"{dataset_label} Best-Epoch {metric}", fontweight="bold")
     ax.set_ylabel(ylabel)
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=35, ha="right")
@@ -334,7 +358,7 @@ def plot_metric_bar(rows: List[ModelBest], metric: str, ylabel: str, out_png: Pa
     plt.close(fig)
 
 
-def plot_f1_iou_scatter(rows: List[ModelBest], out_png: Path) -> None:
+def plot_f1_iou_scatter(rows: List[ModelBest], out_png: Path, dataset_label: str) -> None:
     f1 = _metric_values(rows, "val_f1")
     iou = _metric_values(rows, "val_iou")
     fig, ax = plt.subplots(figsize=(7, 6))
@@ -343,15 +367,17 @@ def plot_f1_iou_scatter(rows: List[ModelBest], out_png: Path) -> None:
         ax.annotate(r.display_name, (x, y), textcoords="offset points", xytext=(4, 4), fontsize=8)
     ax.set_xlabel("Val IoU")
     ax.set_ylabel("Val F1")
-    ax.set_title("Model Trade-off: F1 vs IoU (Best Epoch)")
+    ax.set_title(f"{dataset_label}: F1 vs IoU (best epoch)")
     ax.grid(alpha=0.3, linestyle="--")
     fig.tight_layout()
     fig.savefig(out_png, dpi=300)
     plt.close(fig)
 
 
-def plot_metric_heatmap(rows: List[ModelBest], out_png: Path) -> None:
-    metrics = ["val_acc", "val_precision", "val_recall", "val_f1", "val_iou", "val_auroc", "val_auprc"]
+def plot_metric_heatmap(rows: List[ModelBest], out_png: Path, dataset_label: str) -> None:
+    metrics = [m for m in ("val_acc", "val_precision", "val_recall", "val_f1", "val_iou") if any(np.isfinite(r.metrics.get(m, np.nan)) for r in rows)]
+    if not metrics:
+        return
     data = np.asarray([[r.metrics.get(m, np.nan) for m in metrics] for r in rows], dtype=float)
     fig, ax = plt.subplots(figsize=(10, max(4, 0.45 * len(rows))))
     im = ax.imshow(data, aspect="auto", cmap="YlGnBu", vmin=0, vmax=1)
@@ -359,7 +385,7 @@ def plot_metric_heatmap(rows: List[ModelBest], out_png: Path) -> None:
     ax.set_xticklabels(metrics, rotation=30, ha="right")
     ax.set_yticks(np.arange(len(rows)))
     ax.set_yticklabels([r.display_name for r in rows])
-    ax.set_title("Validation Metrics Heatmap (Best Epoch)")
+    ax.set_title(f"{dataset_label}: validation metrics heatmap (best epoch)")
     for i in range(data.shape[0]):
         for j in range(data.shape[1]):
             ax.text(j, i, f"{data[i, j]:.3f}", ha="center", va="center", fontsize=7, color="black")
@@ -369,17 +395,19 @@ def plot_metric_heatmap(rows: List[ModelBest], out_png: Path) -> None:
     plt.close(fig)
 
 
-def build_plots(rows: List[ModelBest], out_dir: Path) -> None:
+def build_plots(rows: List[ModelBest], out_dir: Path, dataset_label: str) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
-    plot_metric_bar(rows, "val_f1", "F1", out_dir / "01_val_f1_bar.png")
-    plot_metric_bar(rows, "val_iou", "IoU", out_dir / "02_val_iou_bar.png")
-    plot_metric_bar(rows, "val_precision", "Precision", out_dir / "03_val_precision_bar.png")
-    plot_metric_bar(rows, "val_recall", "Recall", out_dir / "04_val_recall_bar.png")
-    plot_metric_bar(rows, "val_acc", "Accuracy", out_dir / "05_val_accuracy_bar.png")
-    plot_metric_bar(rows, "val_auroc", "AUROC", out_dir / "06_val_auroc_bar.png")
-    plot_metric_bar(rows, "val_auprc", "AUPRC", out_dir / "07_val_auprc_bar.png")
-    plot_f1_iou_scatter(rows, out_dir / "08_f1_vs_iou_scatter.png")
-    plot_metric_heatmap(rows, out_dir / "09_validation_metrics_heatmap.png")
+    plot_metric_bar(rows, "val_f1", "F1", out_dir / "01_val_f1_bar.png", dataset_label)
+    plot_metric_bar(rows, "val_iou", "IoU", out_dir / "02_val_iou_bar.png", dataset_label)
+    plot_metric_bar(rows, "val_precision", "Precision", out_dir / "03_val_precision_bar.png", dataset_label)
+    plot_metric_bar(rows, "val_recall", "Recall", out_dir / "04_val_recall_bar.png", dataset_label)
+    plot_metric_bar(rows, "val_acc", "Accuracy", out_dir / "05_val_accuracy_bar.png", dataset_label)
+    if any(np.isfinite(r.metrics.get("val_auroc", np.nan)) for r in rows):
+        plot_metric_bar(rows, "val_auroc", "AUROC", out_dir / "06_val_auroc_bar.png", dataset_label)
+    if any(np.isfinite(r.metrics.get("val_auprc", np.nan)) for r in rows):
+        plot_metric_bar(rows, "val_auprc", "AUPRC", out_dir / "07_val_auprc_bar.png", dataset_label)
+    plot_f1_iou_scatter(rows, out_dir / "08_f1_vs_iou_scatter.png", dataset_label)
+    plot_metric_heatmap(rows, out_dir / "09_validation_metrics_heatmap.png", dataset_label)
 
 
 def parse_hierarchy(s: str) -> List[str]:
@@ -412,8 +440,11 @@ def main() -> None:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path(__file__).resolve().parent / "l4s_ablation_report",
-        help="Output directory for summary CSV (and optional legacy figures).",
+        default=None,
+        help=(
+            "Output directory for summary CSV (and optional legacy figures). "
+            "Default: l4s_ablation_report for landslide4sense, bijie_ablation_report for bijie."
+        ),
     )
     parser.add_argument(
         "--legacy-simple-plots",
@@ -437,21 +468,32 @@ def main() -> None:
 
     all_models = collect_best_models(sam_root, args.dataset, exclude)
     if not all_models:
+        hint = (
+            "ablation_study/baseline_models/*/bijie/*/results/epoch_metrics*.csv, "
+            "ablation_study/dual_stream_gated/outputs_bijie/**/epoch_metrics*.csv, "
+            "runs/bijie/*/results/epoch_metrics*.csv"
+            if args.dataset == "bijie"
+            else "ablation_study/baseline_models/*/landslide4sense/*/results/epoch_metrics*.csv"
+        )
         raise SystemExit(
-            f"No {args.dataset} epoch_metrics CSV files were found under {sam_root}. "
-            f"Expected e.g. ablation_study/baseline_models/*/landslide4sense/*/results/epoch_metrics*.csv"
+            f"No {args.dataset} epoch_metrics CSV files were found under {sam_root}. Expected paths like: {hint}"
         )
 
     hierarchy = parse_hierarchy(args.hierarchy) if args.hierarchy else None
     ordered = apply_ordering(all_models, hierarchy)
 
+    here = Path(__file__).resolve().parent
     out_dir = args.output_dir
+    if out_dir is None:
+        out_dir = here / ("bijie_ablation_report" if args.dataset == "bijie" else "l4s_ablation_report")
+    out_dir = out_dir.expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     name = f"{args.dataset}_best_validation_summary.csv"
     csv_path = out_dir / name
     write_summary_csv(ordered, csv_path)
     if args.legacy_simple_plots:
-        build_plots(ordered, out_dir)
+        ds_label = "Bijie" if args.dataset == "bijie" else "Landslide4Sense"
+        build_plots(ordered, out_dir, ds_label)
 
     print(f"Saved summary CSV: {csv_path}")
     if args.legacy_simple_plots:
