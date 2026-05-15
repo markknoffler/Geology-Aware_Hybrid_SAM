@@ -41,11 +41,23 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-_SAM = Path(__file__).resolve().parents[2]
-if str(_SAM) not in sys.path:
-    sys.path.insert(0, str(_SAM))
-if str(_SAM / "ablation_study" / "baseline_models") not in sys.path:
-    sys.path.insert(0, str(_SAM / "ablation_study" / "baseline_models"))
+def _resolve_code_root() -> Path:
+    """Directory containing model_architecture_cfm_landseg, ablation_study, and runs."""
+    here = Path(__file__).resolve()
+    for base in (here.parents[1], here.parents[2]):
+        if (base / "ablation_study" / "baseline_models").is_dir():
+            return base
+        if (base.parent / "ablation_study" / "baseline_models").is_dir():
+            return base.parent
+    return here.parents[2]
+
+
+_CODE_ROOT = _resolve_code_root()
+if str(_CODE_ROOT) not in sys.path:
+    sys.path.insert(0, str(_CODE_ROOT))
+_BASELINE = _CODE_ROOT / "ablation_study" / "baseline_models"
+if str(_BASELINE) not in sys.path:
+    sys.path.insert(0, str(_BASELINE))
 
 from common.datasets import build_bijie_split, build_l4s_split
 from common.metrics import (
@@ -62,7 +74,19 @@ from model_architecture_cfm_landseg.training.train import prep_batch_triplet
 from model_architecture_cfm_landseg.tri_cfm_net import TriEncoderCFMNet
 
 DEFAULT_MODEL_ID = "tri_encoder_cfm_v2"
-RESULTS_ROOT = _SAM / "resources" / "results" / "landslide_presence_report"
+
+
+def _default_results_root() -> Path:
+    for candidate in (
+        _CODE_ROOT / "resources" / "results" / "landslide_presence_report",
+        _CODE_ROOT.parent / "resources" / "results" / "landslide_presence_report",
+    ):
+        if candidate.parent.is_dir():
+            return candidate
+    return _CODE_ROOT / "resources" / "results" / "landslide_presence_report"
+
+
+RESULTS_ROOT = _default_results_root()
 
 
 @dataclass
@@ -96,18 +120,24 @@ def resolve_checkpoint(run_dir: Path, epoch: int, explicit: Optional[Path]) -> P
         if not p.is_file():
             raise SystemExit(f"Checkpoint not found: {p}")
         return p
-    ckpt_dir = run_dir / "checkpoints"
-    epoch_path = ckpt_dir / f"epoch_{epoch:04d}.pt"
-    if epoch_path.is_file():
-        return epoch_path
-    best_path = ckpt_dir / "best.pt"
-    if best_path.is_file():
-        print(
-            f"WARNING: {epoch_path} missing; using {best_path} "
-            f"(best-metric checkpoint, epoch inside file may differ from summary {epoch})."
-        )
-        return best_path
-    raise SystemExit(f"No checkpoint under {ckpt_dir} for epoch {epoch}")
+    # Training saves under ``checkpoint/`` (singular); see training/train.py.
+    for sub in ("checkpoint", "checkpoints"):
+        ckpt_dir = run_dir / sub
+        if not ckpt_dir.is_dir():
+            continue
+        epoch_path = ckpt_dir / f"epoch_{epoch:04d}.pt"
+        if epoch_path.is_file():
+            return epoch_path
+        best_path = ckpt_dir / "best.pt"
+        if best_path.is_file():
+            print(
+                f"WARNING: {epoch_path} missing; using {best_path} "
+                f"(best-metric checkpoint, epoch inside file may differ from summary {epoch})."
+            )
+            return best_path
+    raise SystemExit(
+        f"No checkpoint under {run_dir}/checkpoint or {run_dir}/checkpoints for epoch {epoch}"
+    )
 
 
 def load_model_from_checkpoint(
@@ -472,15 +502,15 @@ def parse_args():
     p.add_argument(
         "--bijie-summary",
         type=Path,
-        default=_SAM / "resources/results/bijie_ablation_report/bijie_best_validation_summary.csv",
+        default=_CODE_ROOT / "resources/results/bijie_ablation_report/bijie_best_validation_summary.csv",
     )
     p.add_argument(
         "--l4s-summary",
         type=Path,
-        default=_SAM / "resources/results/l4s_ablation_report/landslide4sense_best_validation_summary.csv",
+        default=_CODE_ROOT / "resources/results/l4s_ablation_report/landslide4sense_best_validation_summary.csv",
     )
-    p.add_argument("--bijie-run-dir", type=Path, default=_SAM / "runs/bijie/tri_encoder_cfm_v2")
-    p.add_argument("--l4s-run-dir", type=Path, default=_SAM / "runs/landslide4sense/tri_encoder_cfm_v2")
+    p.add_argument("--bijie-run-dir", type=Path, default=_CODE_ROOT / "runs/bijie/tri_encoder_cfm_v2")
+    p.add_argument("--l4s-run-dir", type=Path, default=_CODE_ROOT / "runs/landslide4sense/tri_encoder_cfm_v2")
     p.add_argument("--bijie-checkpoint", type=Path, default=None)
     p.add_argument("--l4s-checkpoint", type=Path, default=None)
     p.add_argument("--output-dir", type=Path, default=RESULTS_ROOT)
