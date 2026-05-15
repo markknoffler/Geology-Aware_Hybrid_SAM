@@ -1,0 +1,3 @@
+model_id,prob_threshold,dataset,best_epoch_summary_csv,checkpoint,summary_csv
+tri_encoder_cfm_v2,0.6,bijie,112,/home/user/Desktop/Deep_learning_projects/CSIR/Geology-Aware_Hybrid_SAM/runs/bijie/tri_encoder_cfm_v2/checkpoint/best.pt,/home/user/Desktop/Deep_learning_projects/CSIR/Geology-Aware_Hybrid_SAM/resources/results/bijie_ablation_report/bijie_best_validation_summary.csv
+tri_encoder_cfm_v2,0.6,landslide4sense,111,/home/user/Desktop/Deep_learning_projects/CSIR/Geology-Aware_Hybrid_SAM/runs/landslide4sense/tri_encoder_cfm_v2/checkpoint/best.pt,/home/user/Desktop/Deep_learning_projects/CSIR/Geology-Aware_Hybrid_SAM/resources/results/l4s_ablation_report/landslide4sense_best_validation_summary.csv
