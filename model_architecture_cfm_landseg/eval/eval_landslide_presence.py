@@ -268,6 +268,12 @@ def aggregate_group(
     gt_present_value: int,
     use_pred_key: str = "pred_present_instance",
 ) -> dict:
+    image_cols = {
+        "image_auroc": float("nan"),
+        "image_auprc": float("nan"),
+        "image_best_f1": float("nan"),
+        "image_best_score_threshold": float("nan"),
+    }
     subset = [r for r in records if r.gt_present == gt_present_value]
     n = len(subset)
     if n == 0:
@@ -287,6 +293,7 @@ def aggregate_group(
             "mean_pixel_iou": float("nan"),
             "mean_pixel_precision": float("nan"),
             "mean_pixel_recall": float("nan"),
+            **image_cols,
         }
 
     preds = [getattr(r, use_pred_key) for r in subset]
@@ -323,38 +330,52 @@ def aggregate_group(
         "mean_pixel_iou": float(np.mean([r.pixel_iou for r in subset])),
         "mean_pixel_precision": float(np.mean([r.pixel_precision for r in subset])),
         "mean_pixel_recall": float(np.mean([r.pixel_recall for r in subset])),
+        **image_cols,
     }
 
 
 def dataset_level_image_metrics(records: Sequence[ImageRecord]) -> dict:
+    base = {
+        "dataset": records[0].dataset if records else "",
+        "gt_class": "all_images",
+        "n_images": len(records),
+        "tp": "",
+        "fp": "",
+        "tn": "",
+        "fn": "",
+        "sensitivity_or_specificity": float("nan"),
+        "false_alarm_rate": float("nan"),
+        "detection_rate": float("nan"),
+        "mean_pred_fg_fraction": float("nan"),
+        "mean_pixel_f1": float("nan"),
+        "mean_pixel_iou": float("nan"),
+        "mean_pixel_precision": float("nan"),
+        "mean_pixel_recall": float("nan"),
+        "image_auroc": float("nan"),
+        "image_auprc": float("nan"),
+        "image_best_f1": float("nan"),
+        "image_best_score_threshold": float("nan"),
+    }
     scores = np.asarray([r.image_score for r in records], dtype=np.float32)
     labels = np.asarray([r.gt_present for r in records], dtype=np.int32)
     n = len(records)
     if n == 0 or len(np.unique(labels)) < 2:
-        return {
-            "dataset": records[0].dataset if records else "",
-            "gt_class": "all_images",
-            "n_images": n,
-            "image_auroc": float("nan"),
-            "image_auprc": float("nan"),
-            "image_best_f1": float("nan"),
-            "image_best_score_threshold": float("nan"),
-        }
+        return base
     prec, rec, thr = _pr_curve(scores, labels)
     fpr, tpr = _roc_curve(scores, labels)
     auprc = float(np.trapz(prec[np.argsort(rec)], rec[np.argsort(rec)]))
     auroc = float(np.trapz(tpr[np.argsort(fpr)], fpr[np.argsort(fpr)]))
     f1s = 2 * prec * rec / (prec + rec + 1e-6)
     best_idx = int(np.argmax(f1s))
-    return {
-        "dataset": records[0].dataset,
-        "gt_class": "all_images",
-        "n_images": n,
-        "image_auroc": auroc,
-        "image_auprc": auprc,
-        "image_best_f1": float(f1s[best_idx]),
-        "image_best_score_threshold": float(thr[best_idx]),
-    }
+    base.update(
+        {
+            "image_auroc": auroc,
+            "image_auprc": auprc,
+            "image_best_f1": float(f1s[best_idx]),
+            "image_best_score_threshold": float(thr[best_idx]),
+        }
+    )
+    return base
 
 
 def write_image_csv(path: Path, records: Sequence[ImageRecord]) -> None:
@@ -385,12 +406,40 @@ def write_summary_csv(path: Path, rows: Sequence[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not rows:
         return
-    fields = list(rows[0].keys())
+    preferred = [
+        "model_id",
+        "best_epoch",
+        "prob_threshold",
+        "min_connected_area_px",
+        "pred_rule",
+        "dataset",
+        "gt_class",
+        "n_images",
+        "tp",
+        "fp",
+        "tn",
+        "fn",
+        "detection_rate",
+        "sensitivity_or_specificity",
+        "false_alarm_rate",
+        "mean_pred_fg_fraction",
+        "mean_pixel_f1",
+        "mean_pixel_iou",
+        "mean_pixel_precision",
+        "mean_pixel_recall",
+        "image_auroc",
+        "image_auprc",
+        "image_best_f1",
+        "image_best_score_threshold",
+    ]
+    all_keys = set().union(*(row.keys() for row in rows))
+    fields = [k for k in preferred if k in all_keys]
+    fields.extend(sorted(all_keys - set(fields)))
     with path.open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=fields)
+        w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         w.writeheader()
         for row in rows:
-            w.writerow(row)
+            w.writerow({k: row.get(k, "") for k in fields})
 
 
 def plot_score_histograms(
