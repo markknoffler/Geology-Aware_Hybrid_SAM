@@ -612,35 +612,57 @@ def pack_submission_bundle(
     l4s_conf: Path,
     bijie_conf: Path,
     l4s_overlay_dir: Path,
+    repo_root: Path,
+    l4s_csv: Path,
+    bijie_csv: Path,
+    presence_report: Path,
 ) -> None:
-    """Manuscript, model spec MD, companion MD, conference PNGs, and overlay fig01–fig04, fig06–fig09 (no fig05 radar)."""
+    """Single flat folder: docx, MDs, summary CSVs, presence CSVs/PNG, prefixed conference PNGs."""
     if bundle_dir.exists():
         shutil.rmtree(bundle_dir)
     bundle_dir.mkdir(parents=True)
-    l4s_out = bundle_dir / "figures_l4s"
-    bijie_out = bundle_dir / "figures_bijie"
-    overlay_out = bundle_dir / "figures_overlay_l4s"
-    l4s_out.mkdir(parents=True)
-    bijie_out.mkdir(parents=True)
-    overlay_out.mkdir(parents=True)
+
     shutil.copy2(docx_src, bundle_dir / docx_src.name)
     shutil.copy2(arch_md_src, bundle_dir / "TRI_ENCODER_MODEL_SPEC.md")
     if companion_md_src.is_file():
         shutil.copy2(companion_md_src, bundle_dir / companion_md_src.name)
-    for folder, dest in ((l4s_conf, l4s_out), (bijie_conf, bijie_out)):
-        if not folder.is_dir():
-            continue
-        for p in sorted(folder.glob("Fig*.png")):
-            shutil.copy2(p, dest / p.name)
-        note = folder / "Fig01_model_architecture_NOTE.txt"
-        if note.is_file():
-            shutil.copy2(note, dest / note.name)
+
+    presence_md = repo_root / "SAM/resources/results/LANDSLIDE_PRESENCE_DETECTION.md"
+    if not presence_md.is_file():
+        presence_md = repo_root / "resources/results/LANDSLIDE_PRESENCE_DETECTION.md"
+    if presence_md.is_file():
+        shutil.copy2(presence_md, bundle_dir / "LANDSLIDE_PRESENCE_DETECTION.md")
+
+    for csv_src in (l4s_csv, bijie_csv):
+        if csv_src.is_file():
+            shutil.copy2(csv_src, bundle_dir / csv_src.name)
+
+    if presence_report.is_dir():
+        for name in (
+            "tri_encoder_presence_combined_table.csv",
+            "tri_encoder_presence_run_manifest.csv",
+            "tri_encoder_presence_images_bijie.csv",
+            "tri_encoder_presence_images_l4s.csv",
+        ):
+            p = presence_report / name
+            if p.is_file():
+                shutil.copy2(p, bundle_dir / name)
+        fig = presence_report / "fig_tri_encoder_presence_score_histogram.png"
+        if fig.is_file():
+            shutil.copy2(fig, bundle_dir / fig.name)
+
+    if l4s_conf.is_dir():
+        for p in sorted(l4s_conf.glob("Fig*.png")) + sorted(l4s_conf.glob("Fig*.txt")):
+            shutil.copy2(p, bundle_dir / f"l4s_{p.name}")
+    if bijie_conf.is_dir():
+        for p in sorted(bijie_conf.glob("Fig*.png")) + sorted(bijie_conf.glob("Fig*.txt")):
+            shutil.copy2(p, bundle_dir / f"bijie_{p.name}")
     if l4s_overlay_dir.is_dir():
         for i in range(1, 10):
             if i == 5:
                 continue
             for p in sorted(l4s_overlay_dir.glob(f"fig{i:02d}_*.png")):
-                shutil.copy2(p, overlay_out / p.name)
+                shutil.copy2(p, bundle_dir / f"overlay_{p.name}")
 
 
 def main() -> None:
@@ -824,6 +846,9 @@ def main() -> None:
     force_all_text_black(doc)
     doc.save(str(out_docx))
     print(f"Wrote {out_docx}")
+    presence_report = root / "SAM/resources/results/landslide_presence_report"
+    if not presence_report.is_dir():
+        presence_report = root / "resources/results/landslide_presence_report"
     pack_submission_bundle(
         bundle_dir,
         out_docx,
@@ -832,6 +857,10 @@ def main() -> None:
         conf_fig,
         bijie_conf_fig,
         fig_dir,
+        root,
+        csv_path,
+        bijie_csv,
+        presence_report,
     )
     print(f"Packed submission bundle: {bundle_dir}")
 

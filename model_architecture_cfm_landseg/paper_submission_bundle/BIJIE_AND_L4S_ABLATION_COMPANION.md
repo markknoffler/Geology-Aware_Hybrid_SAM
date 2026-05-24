@@ -53,18 +53,25 @@ Source file: `SAM/resources/results/bijie_ablation_report/bijie_best_validation_
 
 The CMC dual-stream article stresses (i) heterogeneous landscapes, (ii) explicit optical–DEM fusion, and (iii) careful decoder design. We keep that vocabulary—sparse masks, domain shift, gated fusion—but swap in our trimodal gates plus conditional flow matching so the writing in the `.docx` stays aligned with your earlier conference draft while acknowledging the newer baseline ladder.
 
-## 5. Figure bundles
+## 5. Paper submission bundle (one flat folder)
 
-| Bundle | Path |
+Everything for the manuscript is copied into **`paper_submission_bundle/`** with **no subdirectories**:
+
+| Prefix / name | Contents |
 | --- | --- |
-| Landslide4Sense conference Figs. 2–13 | `SAM/resources/results/l4s_ablation_report/paper_comparison_figures/conference_remotesensing_landslide/` |
-| Bijie conference Figs. 14–25 (same filenames) | `SAM/resources/results/bijie_ablation_report/paper_comparison_figures/conference_bijie/` |
+| `landslide4sense_best_validation_summary.csv`, `bijie_best_validation_summary.csv` | Pixel ablation tables |
+| `l4s_Fig02_*.png` … `l4s_Fig13_*.png` | Landslide4Sense conference figures |
+| `bijie_Fig02_*.png` … `bijie_Fig13_*.png` | Bijie conference figures |
+| `overlay_fig01_*.png` … `overlay_fig09_*.png` | Supplementary overlays (fig05 omitted) |
+| `tri_encoder_presence_*.csv`, `fig_tri_encoder_presence_score_histogram.png` | Presence eval |
+| `BIJIE_AND_L4S_ABLATION_COMPANION.md`, `LANDSLIDE_PRESENCE_DETECTION.md`, `TRI_ENCODER_MODEL_SPEC.md` | Documentation |
+| `conference_manuscript_tri_encoder_cfm.docx` | Word file |
 
-`paper_submission_bundle/` (created when you run `build_conference_docx.py`) copies **only** the Word manuscript, `MODEL_ARCHITECTURE.md` as `TRI_ENCODER_MODEL_SPEC.md`, this companion note, and those PNGs.
+Populate on server: `bash resources/results/populate_paper_submission_bundle.sh`
 
-## 6. Image-level landslide vs non-landslide (TriEncoderCFMNet only)
+## 6. Image-level landslide vs non-landslide
 
-See **`SAM/resources/results/LANDSLIDE_PRESENCE_DETECTION.md`** (methodology, table template, figure caption). Run `SAM/resources/results/run_landslide_presence_eval.sh` on the server with `BIJIE_ROOT` / `L4S_ROOT` set; outputs land in `landslide_presence_report/`.
+See **`LANDSLIDE_PRESENCE_DETECTION.md`** in the same flat bundle folder (not a subfolder).
 
 ## 7. Commands worth keeping
 
@@ -78,7 +85,8 @@ python3 SAM/resources/results/generate_paper_comparison_figures.py \
   --summary-csv SAM/resources/results/bijie_ablation_report/bijie_best_validation_summary.csv \
   --output-dir SAM/resources/results/bijie_ablation_report/paper_comparison_figures \
   --focus-model-id tri_encoder_cfm_v2
-# bash SAM/resources/results/run_landslide_presence_eval.sh
+# Image-level presence (mentor request; run on server with dataset paths):
+#   bash SAM/resources/results/run_landslide_presence_eval.sh
 python3 SAM/model_architecture_cfm_landseg/scripts/build_conference_docx.py
 ```
 

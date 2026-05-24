@@ -120,7 +120,12 @@ Requirements: PyTorch, same Python path as training (`SAM` on `PYTHONPATH` or ru
 
 ## 5. Outputs (fill into paper after you run)
 
-Directory: `SAM/resources/results/landslide_presence_report/`
+| Location | Path |
+| --- | --- |
+| Working outputs (eval script) | `resources/results/landslide_presence_report/` |
+| **Paper bundle (flat, all paper files)** | `model_architecture_cfm_landseg/paper_submission_bundle/` |
+
+After eval: `bash resources/results/populate_paper_submission_bundle.sh`
 
 | File | Purpose |
 | --- | --- |
