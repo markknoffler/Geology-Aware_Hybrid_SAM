@@ -1,0 +1,13 @@
+# bijie_landslide
+# threshold=0.6
+df027
+hz070
+hz080
+js006
+ny017
+ny039
+ny070
+zj007
+zj045
+zj107
+zj112
